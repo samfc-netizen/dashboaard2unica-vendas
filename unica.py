@@ -798,12 +798,12 @@ else:
     st.info("Sem dados (ou coluna CLIENTE ausente) para montar o Ranking de Clientes.")
 
 # =========================
-# SEÇÃO 7 — Análise por Marca (Clientes → Linhas)
+# SEÇÃO 7 — Análise por Marca (Clientes → Linhas do cliente dentro da marca)
 # =========================
 st.divider()
-st.markdown("## Análise por Marca (Clientes e Linhas)")
+st.markdown("## Análise por Marca (Clientes e Linhas por Cliente)")
 
-if (not df_periodo.empty) and ("MARCA" in df_periodo.columns):
+if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in df_periodo.columns) and ("LINHA" in df_periodo.columns):
 
     df_m = df_periodo.copy()
     df_m["MARCA"] = df_m["MARCA"].fillna("N/I").astype(str).map(norm_text)
@@ -811,17 +811,15 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns):
     df_m["LINHA"] = df_m["LINHA"].fillna("N/I").astype(str).map(norm_text)
 
     marcas_opts = sorted(df_m["MARCA"].dropna().unique().tolist(), key=lambda x: x.upper())
-
     marca_sel = st.selectbox("Selecionar marca", options=marcas_opts, index=0, key="MARCA_DRILL")
 
     df_marca = df_m[df_m["MARCA"] == marca_sel].copy()
     total_marca = float(df_marca["VR_TOTAL"].sum()) if not df_marca.empty else 0.0
-
     st.metric("Total da marca no período", format_brl(total_marca))
 
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns([1.15, 0.85])
 
-    # ---- Clientes da Marca ----
+    # ---- (1) Ranking de Clientes da Marca ----
     with col1:
         st.subheader("Clientes que mais compram esta marca")
 
@@ -830,37 +828,53 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns):
             .sort_values("VR_TOTAL", ascending=False)
             .rename(columns={"VR_TOTAL": "FAT (R$)"})
         )
-
         cli_marca["% SOBRE A MARCA"] = cli_marca["FAT (R$)"].apply(
             lambda x: (x / total_marca * 100) if total_marca else None
         )
 
-        cli_show = cli_marca.head(20).copy()
+        cli_show = cli_marca.head(30).copy()
         cli_show["FAT (R$)"] = cli_show["FAT (R$)"].map(format_brl)
         cli_show["% SOBRE A MARCA"] = cli_show["% SOBRE A MARCA"].apply(fmt_pct)
 
         st.dataframe(cli_show, use_container_width=True, hide_index=True)
 
-    # ---- Linhas da Marca ----
+    # ---- (2) Seleciona Cliente → Linhas dentro da Marca ----
     with col2:
-        st.subheader("Linhas mais vendidas dentro da marca")
+        st.subheader("Selecionar cliente (para ver linhas dentro da marca)")
 
-        linhas_marca = (
-            df_marca.groupby("LINHA", as_index=False)["VR_TOTAL"].sum()
-            .sort_values("VR_TOTAL", ascending=False)
-            .rename(columns={"VR_TOTAL": "FAT (R$)"})
-        )
+        clientes_opts = cli_marca["CLIENTE"].tolist()
+        if not clientes_opts:
+            st.info("Sem clientes para esta marca no filtro atual.")
+        else:
+            cliente_sel = st.selectbox(
+                "Cliente",
+                options=clientes_opts,
+                index=0,
+                key="MARCA_CLIENTE_SEL"
+            )
 
-        linhas_marca["% SOBRE A MARCA"] = linhas_marca["FAT (R$)"].apply(
-            lambda x: (x / total_marca * 100) if total_marca else None
-        )
+            df_marca_cli = df_marca[df_marca["CLIENTE"] == cliente_sel].copy()
+            total_marca_cli = float(df_marca_cli["VR_TOTAL"].sum()) if not df_marca_cli.empty else 0.0
 
-        linhas_show = linhas_marca.head(20).copy()
-        linhas_show["FAT (R$)"] = linhas_show["FAT (R$)"].map(format_brl)
-        linhas_show["% SOBRE A MARCA"] = linhas_show["% SOBRE A MARCA"].apply(fmt_pct)
+            st.metric("Total do cliente na marca (período)", format_brl(total_marca_cli))
 
-        st.dataframe(linhas_show, use_container_width=True, hide_index=True)
+            linhas_cli = (
+                df_marca_cli.groupby("LINHA", as_index=False)["VR_TOTAL"].sum()
+                .sort_values("VR_TOTAL", ascending=False)
+                .rename(columns={"VR_TOTAL": "FAT (R$)"})
+            )
+            linhas_cli["% SOBRE A MARCA (CLIENTE)"] = linhas_cli["FAT (R$)"].apply(
+                lambda x: (x / total_marca_cli * 100) if total_marca_cli else None
+            )
+
+            linhas_show = linhas_cli.head(25).copy()
+            linhas_show["FAT (R$)"] = linhas_show["FAT (R$)"].map(format_brl)
+            linhas_show["% SOBRE A MARCA (CLIENTE)"] = linhas_show["% SOBRE A MARCA (CLIENTE)"].apply(fmt_pct)
+
+            st.markdown(f"**Linhas mais compradas por {cliente_sel} dentro da marca {marca_sel}**")
+            st.dataframe(linhas_show, use_container_width=True, hide_index=True)
 
 else:
-    st.info("Sem dados (ou coluna MARCA ausente) para montar análise por marca.")
+    st.info("Preciso das colunas MARCA, CLIENTE e LINHA para montar a análise por marca.")
+
 
