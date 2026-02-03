@@ -521,6 +521,60 @@ with cB:
         st.plotly_chart(fig_seg, use_container_width=True)
     else:
         st.info("Sem dados (ou coluna SEGMENTO ausente) para o período/vendedor selecionado.")
+
+# ===== Top 10 Linhas (com drill de marcas dentro da linha) =====
+st.markdown("### Top 10 Linhas")
+if (not df_periodo.empty) and ("LINHA" in df_periodo.columns):
+    total_geral_linhas = float(df_periodo["VR_TOTAL"].sum()) if len(df_periodo) else 0.0
+    linhas_tbl = (
+        df_periodo.groupby("LINHA", as_index=False)["VR_TOTAL"].sum()
+        .sort_values("VR_TOTAL", ascending=False)
+        .rename(columns={"VR_TOTAL": "FAT (R$)"})
+    )
+    linhas_tbl["% SOBRE TOTAL"] = linhas_tbl["FAT (R$)"].apply(lambda x: (x / total_geral_linhas * 100) if total_geral_linhas else None)
+
+    top10_linhas = linhas_tbl.head(10).copy()
+    top10_linhas_show = top10_linhas.copy()
+    top10_linhas_show["FAT (R$)"] = top10_linhas_show["FAT (R$)"].map(format_brl)
+    top10_linhas_show["% SOBRE TOTAL"] = top10_linhas["% SOBRE TOTAL"].apply(fmt_pct)
+    st.dataframe(top10_linhas_show, use_container_width=True, hide_index=True)
+
+    with st.expander("Drill: marcas que performaram dentro da linha (e % sobre a linha)"):
+        linhas_opts = (
+            linhas_tbl["LINHA"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().unique().tolist()
+        )
+        linhas_opts = sorted(set(linhas_opts), key=lambda x: x.upper())
+        linha_sel = st.selectbox("Selecionar linha", options=linhas_opts, index=0, key="LINHA_DRILL")
+        df_linha = df_periodo[df_periodo["LINHA"].fillna("").astype(str).map(norm_text) == norm_text(linha_sel)].copy()
+        total_linha = float(df_linha["VR_TOTAL"].sum()) if not df_linha.empty else 0.0
+
+        if df_linha.empty or ("MARCA" not in df_linha.columns):
+            st.info("Sem dados (ou coluna MARCA ausente) para detalhar marcas dentro desta linha.")
+        else:
+            marcas_linha = (
+                df_linha.groupby("MARCA", as_index=False)["VR_TOTAL"].sum()
+                .sort_values("VR_TOTAL", ascending=False)
+                .rename(columns={"VR_TOTAL": "FAT (R$)"})
+            )
+            marcas_linha["% SOBRE LINHA"] = marcas_linha["FAT (R$)"].apply(lambda x: (x / total_linha * 100) if total_linha else None)
+
+            top_m = marcas_linha.head(15).copy()
+            top_m_show = top_m.copy()
+            top_m_show["FAT (R$)"] = top_m_show["FAT (R$)"].map(format_brl)
+            top_m_show["% SOBRE LINHA"] = top_m["% SOBRE LINHA"].apply(fmt_pct)
+            st.metric("Total da linha (período)", format_brl(total_linha))
+            st.dataframe(top_m_show, use_container_width=True, hide_index=True)
+
+            resto_m = marcas_linha.iloc[15:].copy()
+            if not resto_m.empty:
+                with st.expander("Ver demais marcas na linha"):
+                    resto_m_show = resto_m.copy()
+                    resto_m_show["FAT (R$)"] = resto_m_show["FAT (R$)"].map(format_brl)
+                    resto_m_show["% SOBRE LINHA"] = resto_m["% SOBRE LINHA"].apply(fmt_pct)
+                    st.dataframe(resto_m_show, use_container_width=True, hide_index=True)
+else:
+    st.info("Sem dados (ou coluna LINHA ausente) para montar Top 10 Linhas no período/vendedor selecionado.")
+
 st.divider()
 # =========================
 # SEÇÃO 5 — Clientes & Regiões (MAPA + EVOLUÇÃO DE CLIENTES)
@@ -622,3 +676,123 @@ if has_city and has_bairro and has_cliente:
         st.info("Sem dados/coluna CLIENTE para montar Evolução de Clientes.")
 else:
     st.info("Preciso das colunas CIDADE, BAIRRO e CLIENTE para o mapa e evolução (alguma está ausente).")
+
+
+# =========================
+# SEÇÃO 6 — Ranking de Clientes (Top clientes + marca/linha preferida + drill por linha → marca)
+# =========================
+st.divider()
+st.markdown("## Ranking de Clientes")
+
+if (not df_periodo.empty) and ("CLIENTE" in df_periodo.columns):
+    df_cli = df_periodo.copy()
+    df_cli["CLIENTE"] = df_cli["CLIENTE"].fillna("N/I").astype(str).map(norm_text)
+
+    total_cli_geral = float(df_cli["VR_TOTAL"].sum()) if len(df_cli) else 0.0
+    base_cli = (
+        df_cli.groupby("CLIENTE", as_index=False)["VR_TOTAL"].sum()
+        .rename(columns={"VR_TOTAL": "FAT (R$)"})
+        .sort_values("FAT (R$)", ascending=False)
+    )
+    base_cli["% SOBRE TOTAL"] = base_cli["FAT (R$)"].apply(lambda x: (x / total_cli_geral * 100) if total_cli_geral else None)
+
+    # Top marca por cliente (se existir)
+    if "MARCA" in df_cli.columns:
+        df_cli["MARCA"] = df_cli["MARCA"].fillna("N/I").astype(str).map(norm_text)
+        cli_marca = (
+            df_cli.groupby(["CLIENTE", "MARCA"], as_index=False)["VR_TOTAL"].sum()
+            .sort_values(["CLIENTE", "VR_TOTAL"], ascending=[True, False])
+        )
+        idx = cli_marca.groupby("CLIENTE")["VR_TOTAL"].idxmax()
+        top_marca_cli = cli_marca.loc[idx, ["CLIENTE", "MARCA"]].rename(columns={"MARCA": "MARCA TOP"})
+        base_cli = base_cli.merge(top_marca_cli, on="CLIENTE", how="left")
+    else:
+        base_cli["MARCA TOP"] = "N/I"
+
+    # Top linha por cliente (se existir)
+    if "LINHA" in df_cli.columns:
+        df_cli["LINHA"] = df_cli["LINHA"].fillna("N/I").astype(str).map(norm_text)
+        cli_linha = (
+            df_cli.groupby(["CLIENTE", "LINHA"], as_index=False)["VR_TOTAL"].sum()
+            .sort_values(["CLIENTE", "VR_TOTAL"], ascending=[True, False])
+        )
+        idx2 = cli_linha.groupby("CLIENTE")["VR_TOTAL"].idxmax()
+        top_linha_cli = cli_linha.loc[idx2, ["CLIENTE", "LINHA"]].rename(columns={"LINHA": "LINHA TOP"})
+        base_cli = base_cli.merge(top_linha_cli, on="CLIENTE", how="left")
+    else:
+        base_cli["LINHA TOP"] = "N/I"
+
+    top_n = 20
+    top_cli = base_cli.head(top_n).copy()
+    top_cli_show = top_cli.copy()
+    top_cli_show["FAT (R$)"] = top_cli_show["FAT (R$)"].map(format_brl)
+    top_cli_show["% SOBRE TOTAL"] = top_cli["% SOBRE TOTAL"].apply(fmt_pct)
+    st.dataframe(top_cli_show[["CLIENTE", "FAT (R$)", "% SOBRE TOTAL", "MARCA TOP", "LINHA TOP"]], use_container_width=True, hide_index=True)
+
+    with st.expander("Drill do cliente: (1) top marca/linha + (2) dentro da linha → marcas que ele compra"):
+        cli_opts = top_cli["CLIENTE"].tolist()
+        if not cli_opts:
+            st.info("Sem clientes para detalhar.")
+        else:
+            cli_sel = st.selectbox("Selecionar cliente", options=cli_opts, index=0, key="CLI_DRILL_SEL")
+            df_c = df_cli[df_cli["CLIENTE"] == cli_sel].copy()
+            fat_cliente = float(df_c["VR_TOTAL"].sum()) if not df_c.empty else 0.0
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Faturamento do cliente (período)", format_brl(fat_cliente))
+            col2.metric("Marca TOP", (top_cli[top_cli["CLIENTE"] == cli_sel]["MARCA TOP"].iloc[0] if "MARCA TOP" in top_cli.columns else "N/I"))
+            col3.metric("Linha TOP", (top_cli[top_cli["CLIENTE"] == cli_sel]["LINHA TOP"].iloc[0] if "LINHA TOP" in top_cli.columns else "N/I"))
+
+            # Tabelas auxiliares do cliente
+            if "MARCA" in df_c.columns:
+                marcas_c = (
+                    df_c.groupby("MARCA", as_index=False)["VR_TOTAL"].sum()
+                    .sort_values("VR_TOTAL", ascending=False)
+                    .rename(columns={"VR_TOTAL": "FAT (R$)"})
+                )
+                marcas_c["% SOBRE CLIENTE"] = marcas_c["FAT (R$)"].apply(lambda x: (x / fat_cliente * 100) if fat_cliente else None)
+                marcas_c_show = marcas_c.head(15).copy()
+                marcas_c_show["FAT (R$)"] = marcas_c_show["FAT (R$)"].map(format_brl)
+                marcas_c_show["% SOBRE CLIENTE"] = marcas_c.head(15)["% SOBRE CLIENTE"].apply(fmt_pct)
+                st.markdown("**Marcas mais compradas pelo cliente (TOP 15)**")
+                st.dataframe(marcas_c_show, use_container_width=True, hide_index=True)
+
+            if "LINHA" in df_c.columns:
+                linhas_c = (
+                    df_c.groupby("LINHA", as_index=False)["VR_TOTAL"].sum()
+                    .sort_values("VR_TOTAL", ascending=False)
+                    .rename(columns={"VR_TOTAL": "FAT (R$)"})
+                )
+                linhas_c["% SOBRE CLIENTE"] = linhas_c["FAT (R$)"].apply(lambda x: (x / fat_cliente * 100) if fat_cliente else None)
+                linhas_c_show = linhas_c.head(15).copy()
+                linhas_c_show["FAT (R$)"] = linhas_c_show["FAT (R$)"].map(format_brl)
+                linhas_c_show["% SOBRE CLIENTE"] = linhas_c.head(15)["% SOBRE CLIENTE"].apply(fmt_pct)
+                st.markdown("**Linhas mais compradas pelo cliente (TOP 15)**")
+                st.dataframe(linhas_c_show, use_container_width=True, hide_index=True)
+
+                # Dentro da linha → marcas do cliente
+                if "MARCA" in df_c.columns:
+                    linhas_opts = linhas_c["LINHA"].tolist()
+                    if linhas_opts:
+                        linha_cli_sel = st.selectbox("Dentro da linha, ver marcas compradas pelo cliente", options=linhas_opts, index=0, key="CLI_LINHA_SEL")
+                        df_cl = df_c[df_c["LINHA"] == linha_cli_sel].copy()
+                        total_linha_cli = float(df_cl["VR_TOTAL"].sum()) if not df_cl.empty else 0.0
+                        marcas_in_linha = (
+                            df_cl.groupby("MARCA", as_index=False)["VR_TOTAL"].sum()
+                            .sort_values("VR_TOTAL", ascending=False)
+                            .rename(columns={"VR_TOTAL": "FAT (R$)"})
+                        )
+                        marcas_in_linha["% SOBRE LINHA (CLIENTE)"] = marcas_in_linha["FAT (R$)"].apply(
+                            lambda x: (x / total_linha_cli * 100) if total_linha_cli else None
+                        )
+                        marcas_in_linha_show = marcas_in_linha.copy()
+                        marcas_in_linha_show["FAT (R$)"] = marcas_in_linha_show["FAT (R$)"].map(format_brl)
+                        marcas_in_linha_show["% SOBRE LINHA (CLIENTE)"] = marcas_in_linha["% SOBRE LINHA (CLIENTE)"].apply(fmt_pct)
+                        st.metric("Total do cliente na linha selecionada", format_brl(total_linha_cli))
+                        st.dataframe(marcas_in_linha_show, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("O cliente não tem linhas registradas no filtro atual.")
+                else:
+                    st.info("Coluna MARCA ausente: não dá para detalhar marcas dentro da linha do cliente.")
+else:
+    st.info("Sem dados (ou coluna CLIENTE ausente) para montar o Ranking de Clientes.")
