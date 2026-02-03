@@ -236,21 +236,42 @@ if "vendedor_sel" not in st.session_state:
     st.session_state["vendedor_sel"] = "TODOS"
 with st.sidebar:
     st.header("Filtros")
-    st.caption("Atualização de dados")
-    if st.button("🔄 Recarregar base (limpar cache)"):
-        st.cache_data.clear()
-        st.rerun()
-    dt_ini, dt_fim = st.date_input(
-        "Período (DATA)",
-        value=(min_dt, max_dt),
-        min_value=min_dt,
-        max_value=max_dt,
-    )
-    if isinstance(dt_ini, (tuple, list)):
-        dt_ini, dt_fim = dt_ini[0], dt_ini[1]
+
+    filtro_tipo = st.radio("Tipo de filtro", ["Período (DATA)", "Mês (ANO/MÊS)"], index=0)
+
+    if filtro_tipo == "Período (DATA)":
+        dt_ini, dt_fim = st.date_input(
+            "Período (DATA)",
+            value=(min_dt, max_dt),
+            min_value=min_dt,
+            max_value=max_dt,
+        )
+        if isinstance(dt_ini, (tuple, list)):
+            dt_ini, dt_fim = dt_ini[0], dt_ini[1]
+        mask_base = (df["DIA"] >= dt_ini) & (df["DIA"] <= dt_fim)
+    else:
+        anos_opts = sorted(df["ANO"].dropna().unique().tolist())
+        ano_padrao = max(anos_opts) if anos_opts else int(df["ANO"].max())
+        ano_sel = st.selectbox("Ano", options=anos_opts, index=(anos_opts.index(ano_padrao) if ano_padrao in anos_opts else 0))
+        meses_sel = st.multiselect("Mês(es)", options=MESES_PT, default=MESES_PT)
+        if not meses_sel:
+            meses_sel = MESES_PT
+        mask_base = (df["ANO"] == int(ano_sel)) & (df["MES"].isin(meses_sel))
+
+        df_tmp = df.loc[mask_base]
+        if df_tmp.empty:
+            dt_ini, dt_fim = min_dt, max_dt
+        else:
+            dt_ini = df_tmp["DIA"].min()
+            dt_fim = df_tmp["DIA"].max()
+
+    # manter seleção de vendedor
+    if "vendedor_sel" not in st.session_state:
+        st.session_state["vendedor_sel"] = "TODOS"
+
     vendedor_sel = "TODOS"
     if "VENDEDOR" in df.columns:
-        df_dt = df[(df["DIA"] >= dt_ini) & (df["DIA"] <= dt_fim)].copy()
+        df_dt = df.loc[mask_base].copy()
         vend_opts = (
             df_dt["VENDEDOR"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().unique().tolist()
             if not df_dt.empty
@@ -266,10 +287,11 @@ with st.sidebar:
         st.session_state["vendedor_sel"] = vendedor_sel
     else:
         st.info("Coluna VENDEDOR não encontrada (filtro por vendedor indisponível).")
+
 # =========================
 # Dataframes filtrados
 # =========================
-mask_dt = (df["DIA"] >= dt_ini) & (df["DIA"] <= dt_fim)
+mask_dt = mask_base
 df_periodo_all = df.loc[mask_dt].copy()
 if df_periodo_all.empty:
     st.warning("Nenhum dado encontrado no período selecionado.")
@@ -280,6 +302,12 @@ if vendedor_sel != "TODOS" and "VENDEDOR" in df_periodo_all.columns:
     ].copy()
 else:
     df_periodo = df_periodo_all.copy()
+
+# Base completa do ano (para tabelas Ano-1 e Metas), sem zerar meses fora do filtro de período/mês
+df_base_vendor = df.copy()
+if vendedor_sel != "TODOS" and "VENDEDOR" in df_base_vendor.columns:
+    df_base_vendor = df_base_vendor[df_base_vendor["VENDEDOR"].fillna("").astype(str).map(norm_text) == norm_text(vendedor_sel)].copy()
+
 ano_atual = int(df_periodo_all["ANO"].max())
 palette = (
     pc.qualitative.Plotly
@@ -348,7 +376,7 @@ st.divider()
 # SEÇÃO 2 — Ano-1 vs Ano Atual
 # =========================
 st.markdown("## Ano-1 vs Ano Atual")
-df_atual = df_periodo[df_periodo["ANO"] == ano_atual].copy() if not df_periodo.empty else df_periodo.copy()
+df_atual = df_base_vendor[df_base_vendor["ANO"] == ano_atual].copy()
 real_mensal_atual = (
     df_atual.groupby("MES", as_index=False)["VR_TOTAL"].sum()
     if not df_atual.empty
