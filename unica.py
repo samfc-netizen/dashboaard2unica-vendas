@@ -653,29 +653,58 @@ if has_city and has_bairro and has_cliente:
     if not df_periodo.empty and "CLIENTE" in df_periodo.columns:
         evo = df_periodo.copy()
         evo["CLIENTE"] = evo["CLIENTE"].fillna("N/I").astype(str).map(norm_text)
-        evo["MES_REF"] = evo["DATA"].dt.to_period("M").astype(str)
-        evo_tbl = (
-            evo.groupby(["MES_REF", "CLIENTE"], as_index=False)["VR_TOTAL"]
+
+        # Base mensal (ANO + MES + CLIENTE) para montar a tabela no formato Jan..Dez
+        evo_base = (
+            evo.groupby(["ANO", "MES", "CLIENTE"], as_index=False)["VR_TOTAL"]
             .sum()
-            .rename(columns={"VR_TOTAL": "FAT (R$)"})
-            .sort_values(["MES_REF", "FAT (R$)"], ascending=[False, False])
+            .rename(columns={"VR_TOTAL": "FAT_NUM"})
         )
-        with st.expander("Abrir evolução (mês → cliente → valor)"):
-            meses_disp = sorted(evo_tbl["MES_REF"].unique().tolist(), reverse=True)
-            mes_pick = st.selectbox("Mês", options=["TODOS"] + meses_disp, index=0, key="EVO_MES")
-            evo_f = evo_tbl.copy()
-            if mes_pick != "TODOS":
-                evo_f = evo_f[evo_f["MES_REF"] == mes_pick].copy()
+
+        def fmt_num_ptbr(v):
+            try:
+                return f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            except Exception:
+                return "0,00"
+
+        with st.expander("Abrir evolução (cliente → meses Jan..Dez)"):
+            anos_disp = sorted(evo_base["ANO"].dropna().unique().tolist())
+            ano_pick = st.selectbox(
+                "Ano",
+                options=anos_disp,
+                index=(len(anos_disp) - 1) if anos_disp else 0,
+                key="EVO_ANO"
+            )
+
+            evo_f = evo_base[evo_base["ANO"] == int(ano_pick)].copy() if anos_disp else evo_base.copy()
+
             busca = st.text_input("Buscar cliente (opcional)", value="", key="EVO_BUSCA").strip()
             if busca:
                 evo_f = evo_f[evo_f["CLIENTE"].str.contains(busca, case=False, na=False)].copy()
-            evo_show = evo_f.copy()
-            evo_show["FAT (R$)"] = evo_show["FAT (R$)"].map(format_brl)
+
+            # Pivot: CLIENTE x MESES (Jan..Dez) + Total
+            evo_pivot = (
+                evo_f.pivot_table(index="CLIENTE", columns="MES", values="FAT_NUM", aggfunc="sum", fill_value=0.0)
+                if not evo_f.empty
+                else pd.DataFrame(index=pd.Index([], name="CLIENTE"))
+            )
+
+            # Garantir colunas Jan..Dez e ordem correta
+            for m in MESES_PT:
+                if m not in evo_pivot.columns:
+                    evo_pivot[m] = 0.0
+            evo_pivot = evo_pivot[MESES_PT].copy()
+            evo_pivot["Total Geral"] = evo_pivot.sum(axis=1)
+
+            evo_pivot = evo_pivot.sort_values("Total Geral", ascending=False)
+
+            evo_show = evo_pivot.reset_index()
+            for m in MESES_PT + ["Total Geral"]:
+                evo_show[m] = evo_show[m].apply(fmt_num_ptbr)
+
             st.dataframe(evo_show, use_container_width=True, hide_index=True)
     else:
         st.info("Sem dados/coluna CLIENTE para montar Evolução de Clientes.")
-else:
-    st.info("Preciso das colunas CIDADE, BAIRRO e CLIENTE para o mapa e evolução (alguma está ausente).")
 
 
 # =========================
@@ -721,16 +750,19 @@ if (not df_periodo.empty) and ("CLIENTE" in df_periodo.columns):
         base_cli = base_cli.merge(top_linha_cli, on="CLIENTE", how="left")
     else:
         base_cli["LINHA TOP"] = "N/I"
+    # Mostrar TODOS os clientes do período (ordenado por faturamento)
+    base_cli_show = base_cli.copy()
+    base_cli_show["FAT (R$)"] = base_cli_show["FAT (R$)"].map(format_brl)
+    base_cli_show["% SOBRE TOTAL"] = base_cli["% SOBRE TOTAL"].apply(fmt_pct)
+    st.dataframe(
+        base_cli_show[["CLIENTE", "FAT (R$)", "% SOBRE TOTAL", "MARCA TOP", "LINHA TOP"]],
+        use_container_width=True,
+        hide_index=True
+    )
 
-    top_n = 20
-    top_cli = base_cli.head(top_n).copy()
-    top_cli_show = top_cli.copy()
-    top_cli_show["FAT (R$)"] = top_cli_show["FAT (R$)"].map(format_brl)
-    top_cli_show["% SOBRE TOTAL"] = top_cli["% SOBRE TOTAL"].apply(fmt_pct)
-    st.dataframe(top_cli_show[["CLIENTE", "FAT (R$)", "% SOBRE TOTAL", "MARCA TOP", "LINHA TOP"]], use_container_width=True, hide_index=True)
 
     with st.expander("Drill do cliente: (1) top marca/linha + (2) dentro da linha → marcas que ele compra"):
-        cli_opts = top_cli["CLIENTE"].tolist()
+        cli_opts = base_cli["CLIENTE"].tolist()
         if not cli_opts:
             st.info("Sem clientes para detalhar.")
         else:
@@ -740,8 +772,8 @@ if (not df_periodo.empty) and ("CLIENTE" in df_periodo.columns):
 
             col1, col2, col3 = st.columns(3)
             col1.metric("Faturamento do cliente (período)", format_brl(fat_cliente))
-            col2.metric("Marca TOP", (top_cli[top_cli["CLIENTE"] == cli_sel]["MARCA TOP"].iloc[0] if "MARCA TOP" in top_cli.columns else "N/I"))
-            col3.metric("Linha TOP", (top_cli[top_cli["CLIENTE"] == cli_sel]["LINHA TOP"].iloc[0] if "LINHA TOP" in top_cli.columns else "N/I"))
+            col2.metric("Marca TOP", (base_cli[base_cli["CLIENTE"] == cli_sel]["MARCA TOP"].iloc[0] if "MARCA TOP" in base_cli.columns else "N/I"))
+            col3.metric("Linha TOP", (base_cli[base_cli["CLIENTE"] == cli_sel]["LINHA TOP"].iloc[0] if "LINHA TOP" in base_cli.columns else "N/I"))
 
             # Tabelas auxiliares do cliente
             if "MARCA" in df_c.columns:
