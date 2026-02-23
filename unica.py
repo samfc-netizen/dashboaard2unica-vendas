@@ -190,6 +190,41 @@ def compress_region_table(reg_tbl: pd.DataFrame, top_n: int = 500) -> pd.DataFra
     out = pd.concat([top, rest_agg], ignore_index=True)
     out["FAT (R$)"] = out["FAT"]
     return out.drop(columns=["FAT"])
+
+
+def build_product_dictionary(df_in: pd.DataFrame, code_col: str, desc_col: str) -> pd.DataFrame:
+    """
+    Cria uma dimensão de produtos única por CÓDIGO, escolhendo uma DESCRIÇÃO representativa.
+
+    Regra de síntese:
+    - Agrupa por código
+    - Escolhe a descrição mais frequente; em empate, escolhe a mais longa (mais informativa)
+    - No dashboard, sempre exibimos a descrição representativa, mas o código é a chave.
+    """
+    if df_in is None or df_in.empty:
+        return pd.DataFrame(columns=[code_col, desc_col])
+
+    d = df_in[[code_col, desc_col]].copy()
+    d[code_col] = d[code_col].astype(str).map(norm_text)
+    d[desc_col] = d[desc_col].astype(str).map(norm_text)
+
+    # limpar vazios
+    d = d[(d[code_col].notna()) & (d[code_col].astype(str).str.strip() != "")]
+    d = d[(d[desc_col].notna()) & (d[desc_col].astype(str).str.strip() != "")]
+
+    if d.empty:
+        return pd.DataFrame(columns=[code_col, desc_col])
+
+    # frequência por (código, descrição)
+    freq = d.groupby([code_col, desc_col], as_index=False).size().rename(columns={"size": "FREQ"})
+    # rank: maior freq, maior comprimento descrição
+    freq["_LEN"] = freq[desc_col].astype(str).str.len()
+    freq = freq.sort_values([code_col, "FREQ", "_LEN"], ascending=[True, False, False])
+
+    # pega a melhor descrição por código
+    best = freq.drop_duplicates(subset=[code_col], keep="first")[[code_col, desc_col]].copy()
+    return best
+
 # =========================
 # Load data
 # =========================
@@ -906,6 +941,64 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
             st.markdown(f"**Linhas mais compradas por {cliente_sel} dentro da marca {marca_sel}**")
             st.dataframe(linhas_show, use_container_width=True, hide_index=True)
 
+
+            # ---- (3) Produtos dentro da linha (para o cliente selecionado, dentro da marca) ----
+            st.subheader("Produtos (dentro da linha)")
+            if ("CODIGO" in df_marca_cli.columns) and ("DESCRICAO" in df_marca_cli.columns):
+                linhas_prod_opts = linhas_cli["LINHA"].tolist()
+                if not linhas_prod_opts:
+                    st.info("Sem linhas para detalhar produtos.")
+                else:
+                    linha_prod_sel = st.selectbox(
+                        "Selecionar linha (para ver produtos dentro da marca e do cliente)",
+                        options=linhas_prod_opts,
+                        index=0,
+                        key="MARCA_CLIENTE_LINHA_PROD_SEL"
+                    )
+
+                    df_marca_cli_linha = df_marca_cli[df_marca_cli["LINHA"] == linha_prod_sel].copy()
+                    total_linha_cli = float(df_marca_cli_linha["VR_TOTAL"].sum()) if not df_marca_cli_linha.empty else 0.0
+                    st.metric("Total do cliente na linha (dentro da marca)", format_brl(total_linha_cli))
+
+                    # Dimensão de produto (CÓDIGO -> DESCRIÇÃO sintetizada)
+                    prod_dim = build_product_dictionary(df_marca_cli_linha, "CODIGO", "DESCRICAO")
+
+                    prod_tbl = (
+                        df_marca_cli_linha.groupby("CODIGO", as_index=False)["VR_TOTAL"].sum()
+                        .sort_values("VR_TOTAL", ascending=False)
+                        .rename(columns={"VR_TOTAL": "FAT (R$)"})
+                    )
+                    prod_tbl = prod_tbl.merge(prod_dim, on="CODIGO", how="left")
+                    prod_tbl["DESCRICAO"] = prod_tbl["DESCRICAO"].fillna("N/I").astype(str).map(norm_text)
+
+                    prod_tbl["% SOBRE LINHA (CLIENTE)"] = prod_tbl["FAT (R$)"].apply(
+                        lambda x: (x / total_linha_cli * 100) if total_linha_cli else None
+                    )
+
+                    prod_show = prod_tbl.head(50).copy()
+                    prod_show["FAT (R$)"] = prod_show["FAT (R$)"].map(format_brl)
+                    prod_show["% SOBRE LINHA (CLIENTE)"] = prod_show["% SOBRE LINHA (CLIENTE)"].apply(fmt_pct)
+
+                    # Mostrar descrição no dashboard (código é a chave)
+                    st.dataframe(
+                        prod_show[["DESCRICAO", "CODIGO", "FAT (R$)", "% SOBRE LINHA (CLIENTE)"]],
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                    resto_p = prod_tbl.iloc[50:].copy()
+                    if not resto_p.empty:
+                        with st.expander("Ver demais produtos da linha"):
+                            resto_p_show = resto_p.copy()
+                            resto_p_show["FAT (R$)"] = resto_p_show["FAT (R$)"].map(format_brl)
+                            resto_p_show["% SOBRE LINHA (CLIENTE)"] = resto_p_show["% SOBRE LINHA (CLIENTE)"].apply(fmt_pct)
+                            st.dataframe(
+                                resto_p_show[["DESCRICAO", "CODIGO", "FAT (R$)", "% SOBRE LINHA (CLIENTE)"]],
+                                use_container_width=True,
+                                hide_index=True
+                            )
+            else:
+                st.info("Colunas CODIGO e/ou DESCRICAO ausentes: não dá para detalhar produtos dentro da linha.")
 else:
     st.info("Preciso das colunas MARCA, CLIENTE e LINHA para montar a análise por marca.")
 
