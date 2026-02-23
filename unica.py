@@ -71,6 +71,26 @@ def normalize_col(s: str) -> str:
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     s = re.sub(r"\s+", " ", s)
     return s.upper()
+
+def find_col(cols, exact=None, must_contain=None):
+    """Return first matching column name from an iterable of column names (already normalized)."""
+    cols = list(cols)
+    if exact:
+        for c in exact:
+            if c in cols:
+                return c
+    if must_contain:
+        # must_contain: list[str] where each str must be contained in column name
+        for col in cols:
+            ok = True
+            for token in must_contain:
+                if token not in col:
+                    ok = False
+                    break
+            if ok:
+                return col
+    return None
+
 def norm_text(s) -> str:
     s = "" if s is None else str(s)
     s = s.strip()
@@ -944,7 +964,18 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
 
             # ---- (3) Produtos dentro da linha (para o cliente selecionado, dentro da marca) ----
             st.subheader("Produtos (dentro da linha)")
-            if ("CODIGO" in df_marca_cli.columns) and ("DESCRICAO" in df_marca_cli.columns):
+            cod_col = find_col(
+                df_marca_cli.columns,
+                exact=["CODIGO", "COD_PRODUTO", "COD PRODUTO", "CODITEM", "COD_ITEM", "CODIGOITEM", "CODIGO_ITEM", "COD. PRODUTO", "COD. PROD", "COD_PROD"],
+                must_contain=["COD"]
+            )
+            desc_col = find_col(
+                df_marca_cli.columns,
+                exact=["DESCRICAO", "DESCRICAO_PRODUTO", "DESCRICAO PRODUTO", "DESC", "DESCR", "DESCR. PRODUTO", "DESCR. PROD"],
+                must_contain=["DESCR"]
+            )
+
+            if (cod_col is not None) and (desc_col is not None):
                 linhas_prod_opts = linhas_cli["LINHA"].tolist()
                 if not linhas_prod_opts:
                     st.info("Sem linhas para detalhar produtos.")
@@ -957,18 +988,23 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                     )
 
                     df_marca_cli_linha = df_marca_cli[df_marca_cli["LINHA"] == linha_prod_sel].copy()
+
+                    # Normaliza colunas de produto (aceita nomes variados na base)
+                    df_marca_cli_linha["_CODIGO_PROD"] = df_marca_cli_linha[cod_col]
+                    df_marca_cli_linha["_DESCRICAO_PROD"] = df_marca_cli_linha[desc_col]
                     total_linha_cli = float(df_marca_cli_linha["VR_TOTAL"].sum()) if not df_marca_cli_linha.empty else 0.0
                     st.metric("Total do cliente na linha (dentro da marca)", format_brl(total_linha_cli))
 
                     # Dimensão de produto (CÓDIGO -> DESCRIÇÃO sintetizada)
-                    prod_dim = build_product_dictionary(df_marca_cli_linha, "CODIGO", "DESCRICAO")
+                    prod_dim = build_product_dictionary(df_marca_cli_linha, "_CODIGO_PROD", "_DESCRICAO_PROD")
 
                     prod_tbl = (
-                        df_marca_cli_linha.groupby("CODIGO", as_index=False)["VR_TOTAL"].sum()
+                        df_marca_cli_linha.groupby("_CODIGO_PROD", as_index=False)["VR_TOTAL"].sum()
                         .sort_values("VR_TOTAL", ascending=False)
                         .rename(columns={"VR_TOTAL": "FAT (R$)"})
                     )
-                    prod_tbl = prod_tbl.merge(prod_dim, on="CODIGO", how="left")
+                    prod_tbl = prod_tbl.merge(prod_dim, on="_CODIGO_PROD", how="left")
+                    prod_tbl = prod_tbl.rename(columns={"_CODIGO_PROD": "CODIGO", "_DESCRICAO_PROD": "DESCRICAO"})
                     prod_tbl["DESCRICAO"] = prod_tbl["DESCRICAO"].fillna("N/I").astype(str).map(norm_text)
 
                     prod_tbl["% SOBRE LINHA (CLIENTE)"] = prod_tbl["FAT (R$)"].apply(
@@ -998,7 +1034,7 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                                 hide_index=True
                             )
             else:
-                st.info("Colunas CODIGO e/ou DESCRICAO ausentes: não dá para detalhar produtos dentro da linha.")
+                st.info("Não encontrei colunas de **código** e/ou **descrição** do produto na base para detalhar produtos dentro da linha. (Procurei por variações de 'COD*' e 'DESCR*' após normalização.)")
 else:
     st.info("Preciso das colunas MARCA, CLIENTE e LINHA para montar a análise por marca.")
 
