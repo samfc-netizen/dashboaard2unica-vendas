@@ -933,17 +933,27 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
         if not clientes_opts:
             st.info("Sem clientes para esta marca no filtro atual.")
         else:
+            # Opção de NÃO SELEÇÃO (Todos): ao não escolher um cliente específico,
+            # os drills passam a considerar TODOS os clientes dentro da marca e filtros atuais.
+            clientes_select_opts = ["(Todos)"] + clientes_opts
+
             cliente_sel = st.selectbox(
                 "Cliente",
-                options=clientes_opts,
+                options=clientes_select_opts,
                 index=0,
                 key="MARCA_CLIENTE_SEL"
             )
 
-            df_marca_cli = df_marca[df_marca["CLIENTE"] == cliente_sel].copy()
+            if cliente_sel == "(Todos)":
+                df_marca_cli = df_marca.copy()
+                cliente_lbl = "Todos os clientes"
+            else:
+                df_marca_cli = df_marca[df_marca["CLIENTE"] == cliente_sel].copy()
+                cliente_lbl = cliente_sel
+
             total_marca_cli = float(df_marca_cli["VR_TOTAL"].sum()) if not df_marca_cli.empty else 0.0
 
-            st.metric("Total do cliente na marca (período)", format_brl(total_marca_cli))
+            st.metric("Total (período) dentro da marca", format_brl(total_marca_cli))
 
             linhas_cli = (
                 df_marca_cli.groupby("LINHA", as_index=False)["VR_TOTAL"].sum()
@@ -958,7 +968,7 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
             linhas_show["FAT (R$)"] = linhas_show["FAT (R$)"].map(format_brl)
             linhas_show["% SOBRE A MARCA (CLIENTE)"] = linhas_show["% SOBRE A MARCA (CLIENTE)"].apply(fmt_pct)
 
-            st.markdown(f"**Linhas mais compradas por {cliente_sel} dentro da marca {marca_sel}**")
+            st.markdown(f"**Linhas mais compradas por {cliente_lbl} dentro da marca {marca_sel}**")
             st.dataframe(linhas_show, use_container_width=True, hide_index=True)
 
 
@@ -993,7 +1003,7 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                     df_marca_cli_linha["_CODIGO_PROD"] = df_marca_cli_linha[cod_col]
                     df_marca_cli_linha["_DESCRICAO_PROD"] = df_marca_cli_linha[desc_col]
                     total_linha_cli = float(df_marca_cli_linha["VR_TOTAL"].sum()) if not df_marca_cli_linha.empty else 0.0
-                    st.metric("Total do cliente na linha (dentro da marca)", format_brl(total_linha_cli))
+                    st.metric("Total na linha (dentro da marca)", format_brl(total_linha_cli))
 
                     # Dimensão de produto (CÓDIGO -> DESCRIÇÃO sintetizada)
                     prod_dim = build_product_dictionary(df_marca_cli_linha, "_CODIGO_PROD", "_DESCRICAO_PROD")
