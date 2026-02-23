@@ -985,6 +985,12 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                 must_contain=["DESCR"]
             )
 
+            qtd_col = find_col(
+                df_marca_cli.columns,
+                exact=["QTD", "QTDE", "QUANTIDADE", "QTD_ITEM", "QTDITEM", "QTD. ITEM"],
+                must_contain=["QTD"]
+            )
+
             if (cod_col is not None) and (desc_col is not None):
                 linhas_prod_opts = linhas_cli["LINHA"].tolist()
                 if not linhas_prod_opts:
@@ -1002,6 +1008,10 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                     # Normaliza colunas de produto (aceita nomes variados na base)
                     df_marca_cli_linha["_CODIGO_PROD"] = df_marca_cli_linha[cod_col]
                     df_marca_cli_linha["_DESCRICAO_PROD"] = df_marca_cli_linha[desc_col]
+                    if qtd_col is not None:
+                        df_marca_cli_linha["_QTD_PROD"] = pd.to_numeric(df_marca_cli_linha[qtd_col], errors="coerce").fillna(0)
+                    else:
+                        df_marca_cli_linha["_QTD_PROD"] = 0
                     total_linha_cli = float(df_marca_cli_linha["VR_TOTAL"].sum()) if not df_marca_cli_linha.empty else 0.0
                     st.metric("Total na linha (dentro da marca)", format_brl(total_linha_cli))
 
@@ -1009,9 +1019,10 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                     prod_dim = build_product_dictionary(df_marca_cli_linha, "_CODIGO_PROD", "_DESCRICAO_PROD")
 
                     prod_tbl = (
-                        df_marca_cli_linha.groupby("_CODIGO_PROD", as_index=False)["VR_TOTAL"].sum()
+                        df_marca_cli_linha.groupby("_CODIGO_PROD", as_index=False)
+                        .agg({"VR_TOTAL": "sum", "_QTD_PROD": "sum"})
                         .sort_values("VR_TOTAL", ascending=False)
-                        .rename(columns={"VR_TOTAL": "FAT (R$)"})
+                        .rename(columns={"VR_TOTAL": "FAT (R$)", "_QTD_PROD": "QTD"})
                     )
                                         # Garantir mesmo tipo na chave (evita ValueError de merge por tipos distintos)
                     prod_tbl["_CODIGO_PROD"] = prod_tbl["_CODIGO_PROD"].astype(str)
@@ -1027,10 +1038,12 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                     prod_show = prod_tbl.head(50).copy()
                     prod_show["FAT (R$)"] = prod_show["FAT (R$)"].map(format_brl)
                     prod_show["% SOBRE LINHA (CLIENTE)"] = prod_show["% SOBRE LINHA (CLIENTE)"].apply(fmt_pct)
+                    # Formatar quantidade (padrão BR: 1.000,00)
+                    prod_show["QTD"] = prod_show["QTD"].apply(lambda v: "-" if pd.isna(v) else f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
                     # Mostrar descrição no dashboard (código é a chave)
                     st.dataframe(
-                        prod_show[["DESCRICAO", "CODIGO", "FAT (R$)", "% SOBRE LINHA (CLIENTE)"]],
+                        prod_show[["DESCRICAO", "CODIGO", "QTD", "FAT (R$)", "% SOBRE LINHA (CLIENTE)"]],
                         use_container_width=True,
                         hide_index=True
                     )
@@ -1041,8 +1054,9 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                             resto_p_show = resto_p.copy()
                             resto_p_show["FAT (R$)"] = resto_p_show["FAT (R$)"].map(format_brl)
                             resto_p_show["% SOBRE LINHA (CLIENTE)"] = resto_p_show["% SOBRE LINHA (CLIENTE)"].apply(fmt_pct)
+                            resto_p_show["QTD"] = resto_p_show["QTD"].apply(lambda v: "-" if pd.isna(v) else f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
                             st.dataframe(
-                                resto_p_show[["DESCRICAO", "CODIGO", "FAT (R$)", "% SOBRE LINHA (CLIENTE)"]],
+                                resto_p_show[["DESCRICAO", "CODIGO", "QTD", "FAT (R$)", "% SOBRE LINHA (CLIENTE)"]],
                                 use_container_width=True,
                                 hide_index=True
                             )
@@ -1050,5 +1064,4 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                 st.info("Não encontrei colunas de **código** e/ou **descrição** do produto na base para detalhar produtos dentro da linha. (Procurei por variações de 'COD*' e 'DESCR*' após normalização.)")
 else:
     st.info("Preciso das colunas MARCA, CLIENTE e LINHA para montar a análise por marca.")
-
 
