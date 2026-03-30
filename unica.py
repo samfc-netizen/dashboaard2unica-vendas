@@ -426,6 +426,75 @@ with r2[2]:
         ("—" if markup is None else f"{markup:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")),
         "Σ Fat ÷ Σ Custo",
     )
+
+# =========================
+# INDICADORES COMPLEMENTARES — Vendedores e Dias de Venda
+# =========================
+st.markdown("### Indicadores Complementares")
+cc1, cc2 = st.columns([1.05, 1.15])
+
+with cc1:
+    st.subheader("Ranking de vendas por vendedor")
+    if "VENDEDOR" in df_periodo_all.columns:
+        rank_vend = df_periodo_all.copy()
+        rank_vend["VENDEDOR"] = rank_vend["VENDEDOR"].fillna("N/I").astype(str).map(norm_text)
+        rank_vend = rank_vend[rank_vend["VENDEDOR"].astype(str).str.strip() != ""].copy()
+
+        rank_vend_tbl = (
+            rank_vend.groupby("VENDEDOR", as_index=False)["VR_TOTAL"].sum()
+            .rename(columns={"VR_TOTAL": "FAT_NUM"})
+            .sort_values("FAT_NUM", ascending=False)
+        )
+
+        total_rank_vend = float(rank_vend_tbl["FAT_NUM"].sum()) if not rank_vend_tbl.empty else 0.0
+        rank_vend_tbl["RANK"] = range(1, len(rank_vend_tbl) + 1)
+        rank_vend_tbl["% SOBRE TOTAL"] = rank_vend_tbl["FAT_NUM"].apply(
+            lambda x: (x / total_rank_vend * 100) if total_rank_vend else None
+        )
+
+        rank_vend_show = rank_vend_tbl[["RANK", "VENDEDOR", "FAT_NUM", "% SOBRE TOTAL"]].copy()
+        rank_vend_show = rank_vend_show.rename(columns={"FAT_NUM": "FAT (R$)"})
+        rank_vend_show["FAT (R$)"] = rank_vend_show["FAT (R$)"].map(format_brl)
+        rank_vend_show["% SOBRE TOTAL"] = rank_vend_tbl["% SOBRE TOTAL"].apply(fmt_pct)
+
+        st.caption("Considera o período selecionado.")
+        st.dataframe(rank_vend_show, use_container_width=True, hide_index=True)
+    else:
+        st.info("Coluna VENDEDOR não encontrada para montar o ranking.")
+
+with cc2:
+    st.subheader("Dias de venda do período")
+    if not df_periodo.empty:
+        dias_tbl = (
+            df_periodo.groupby("DIA", as_index=False)["VR_TOTAL"].sum()
+            .rename(columns={"VR_TOTAL": "FAT_NUM"})
+            .sort_values(["FAT_NUM", "DIA"], ascending=[False, True])
+        )
+        dias_tbl = dias_tbl[dias_tbl["FAT_NUM"] > 0].copy()
+
+        if dias_tbl.empty:
+            st.info("Não há dias com venda no filtro atual.")
+        else:
+            top_qtd = min(3, len(dias_tbl))
+            dias_tbl["DESTAQUE"] = ""
+            dias_tbl.loc[dias_tbl.index[:top_qtd], "DESTAQUE"] = [f"TOP {i}" for i in range(1, top_qtd + 1)]
+            dias_tbl["DIA SEMANA"] = pd.to_datetime(dias_tbl["DIA"]).dt.day_name()
+
+            dias_show = dias_tbl[["DIA", "DIA SEMANA", "FAT_NUM", "DESTAQUE"]].copy()
+            dias_show["DIA"] = pd.to_datetime(dias_show["DIA"]).dt.strftime("%d/%m/%Y")
+            dias_show = dias_show.rename(columns={"FAT_NUM": "VENDAS (R$)"})
+
+            def _style_dias(row):
+                if str(row.get("DESTAQUE", "")).startswith("TOP"):
+                    return ["background-color: rgba(11,94,215,0.18); font-weight:700;" for _ in row.index]
+                return ["" for _ in row.index]
+
+            sty_dias = dias_show.style.apply(_style_dias, axis=1).format({"VENDAS (R$)": lambda x: format_brl(x)})
+            st.caption("Os maiores dias de venda do filtro atual ficam destacados.")
+            st.dataframe(sty_dias, use_container_width=True, hide_index=True)
+    else:
+        st.info("Sem dados para montar a tabela de dias de venda.")
+
 st.divider()
 # =========================
 # SEÇÃO 2 — Ano-1 vs Ano Atual
