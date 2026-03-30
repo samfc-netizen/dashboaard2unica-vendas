@@ -18,6 +18,15 @@ st.title("Dashboard 2 - Única")
 ARQUIVO_EXCEL = "base unica.xlsx"
 MESES_PT = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
 MES_NUM_TO_PT = {i + 1: m for i, m in enumerate(MESES_PT)}
+DIAS_SEMANA_PT = {
+    "Monday": "Segunda-feira",
+    "Tuesday": "Terça-feira",
+    "Wednesday": "Quarta-feira",
+    "Thursday": "Quinta-feira",
+    "Friday": "Sexta-feira",
+    "Saturday": "Sábado",
+    "Sunday": "Domingo",
+}
 # Ano-1 fixo (2025)
 ANO_1 = 2025
 ANO_1_MENSAL = {
@@ -478,7 +487,7 @@ with cc2:
             top_qtd = min(3, len(dias_tbl))
             dias_tbl["DESTAQUE"] = ""
             dias_tbl.loc[dias_tbl.index[:top_qtd], "DESTAQUE"] = [f"TOP {i}" for i in range(1, top_qtd + 1)]
-            dias_tbl["DIA SEMANA"] = pd.to_datetime(dias_tbl["DIA"]).dt.day_name()
+            dias_tbl["DIA SEMANA"] = pd.to_datetime(dias_tbl["DIA"]).dt.day_name().map(DIAS_SEMANA_PT)
 
             dias_show = dias_tbl[["DIA", "DIA SEMANA", "FAT_NUM", "DESTAQUE"]].copy()
             dias_show["DIA"] = pd.to_datetime(dias_show["DIA"]).dt.strftime("%d/%m/%Y")
