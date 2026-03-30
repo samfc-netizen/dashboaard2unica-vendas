@@ -490,7 +490,7 @@ with cc2:
             dias_tbl["DIA SEMANA"] = pd.to_datetime(dias_tbl["DIA"]).dt.day_name().map(DIAS_SEMANA_PT)
 
             dias_show = dias_tbl[["DIA", "DIA SEMANA", "FAT_NUM", "DESTAQUE"]].copy()
-            dias_show["DIA"] = pd.to_datetime(dias_show["DIA"]).dt.strftime("%d/%m/%Y")
+            dias_show["DIA"] = pd.to_datetime(dias_show["DIA"])
             dias_show = dias_show.rename(columns={"FAT_NUM": "VENDAS (R$)"})
 
             def _style_dias(row):
@@ -498,8 +498,11 @@ with cc2:
                     return ["background-color: rgba(11,94,215,0.18); font-weight:700;" for _ in row.index]
                 return ["" for _ in row.index]
 
-            sty_dias = dias_show.style.apply(_style_dias, axis=1).format({"VENDAS (R$)": lambda x: format_brl(x)})
-            st.caption("Os maiores dias de venda do filtro atual ficam destacados.")
+            sty_dias = dias_show.style.apply(_style_dias, axis=1).format({
+                "DIA": lambda x: pd.to_datetime(x).strftime("%d/%m/%Y") if pd.notna(x) else "—",
+                "VENDAS (R$)": lambda x: format_brl(x),
+            })
+            st.caption("Ao clicar na coluna DIA, a ordenação respeita a data real (do mais antigo para o mais novo).")
             st.dataframe(sty_dias, use_container_width=True, hide_index=True)
     else:
         st.info("Sem dados para montar a tabela de dias de venda.")
