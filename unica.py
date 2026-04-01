@@ -166,11 +166,11 @@ def style_diff_column(df_show: pd.DataFrame, diff_col_name: str):
         except Exception:
             return ""
         if x > 0:
-            return "color:#0B5ED7;font-weight:700;"  # azul
+            return "color:#0B5ED7;font-weight:700;"
         if x < 0:
-            return "color:#DC3545;font-weight:700;"  # vermelho
+            return "color:#DC3545;font-weight:700;"
         return ""
-    return df_show.style.applymap(_style, subset=[diff_col_name])
+    return df_show.style.map(_style, subset=[diff_col_name])
 def metric_card(title: str, value: str, subtitle: str = ""):
     st.markdown(
         f"""
