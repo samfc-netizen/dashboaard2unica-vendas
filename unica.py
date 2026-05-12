@@ -2,6 +2,9 @@
 # Dashboard 2 - Única (Streamlit)
 # Arquivo esperado na raiz do projeto: "base unica.xlsx"
 import re
+import io
+import html
+from datetime import datetime
 import unicodedata
 import pandas as pd
 import streamlit as st
@@ -15,6 +18,49 @@ import glob
 # =========================
 st.set_page_config(page_title="Dashboard 2 - Única", layout="wide")
 st.title("Dashboard 2 - Única")
+
+st.markdown("""
+<style>
+/* Botões PDF compactos e discretos */
+div.stDownloadButton {
+    display: inline-block !important;
+    width: auto !important;
+    margin-top: 0.35rem !important;
+    margin-bottom: 0.75rem !important;
+}
+div.stDownloadButton > button {
+    background: linear-gradient(90deg, #ff4b4b, #ff7a00) !important;
+    color: white !important;
+    font-weight: 700 !important;
+    border-radius: 12px !important;
+    border: none !important;
+    padding: 0.55rem 1.05rem !important;
+    font-size: 0.88rem !important;
+    min-height: 38px !important;
+    width: auto !important;
+    box-shadow: 0px 3px 9px rgba(0,0,0,0.18) !important;
+    transition: all 0.20s ease-in-out !important;
+}
+div.stDownloadButton > button:hover {
+    transform: translateY(-1px);
+    background: linear-gradient(90deg, #ff2d2d, #ff5e00) !important;
+    color: #ffffff !important;
+    box-shadow: 0px 4px 12px rgba(0,0,0,0.22) !important;
+}
+div.stDownloadButton > button:focus {
+    outline: none !important;
+    border: none !important;
+    box-shadow: 0px 3px 9px rgba(0,0,0,0.18) !important;
+}
+div.stDownloadButton > button p {
+    color: white !important;
+    font-weight: 700 !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 ARQUIVO_EXCEL = "base unica.xlsx"
 MESES_PT = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
 MES_NUM_TO_PT = {i + 1: m for i, m in enumerate(MESES_PT)}
@@ -192,6 +238,175 @@ def metric_card(title: str, value: str, subtitle: str = ""):
         """,
         unsafe_allow_html=True,
     )
+
+
+def _pdf_imports():
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+        return colors, TA_CENTER, TA_LEFT, A4, landscape, getSampleStyleSheet, ParagraphStyle, cm, SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+    except Exception as e:
+        raise RuntimeError("Para exportar em PDF, adicione 'reportlab' no requirements.txt e instale com: pip install reportlab") from e
+
+
+def _prepare_df_for_pdf(df_in: pd.DataFrame, max_rows: int | None = None) -> pd.DataFrame:
+    df_pdf = df_in.copy()
+    if not isinstance(df_pdf.index, pd.RangeIndex):
+        df_pdf = df_pdf.reset_index()
+    df_pdf = df_pdf.fillna("").astype(str)
+    if max_rows is not None and len(df_pdf) > max_rows:
+        df_pdf = df_pdf.head(max_rows).copy()
+    return df_pdf
+
+
+def dataframe_to_pdf_bytes(df_in: pd.DataFrame, titulo: str = "Relatório", subtitulo: str = "", max_rows: int | None = None) -> bytes:
+    colors, TA_CENTER, TA_LEFT, A4, landscape, getSampleStyleSheet, ParagraphStyle, cm, SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak = _pdf_imports()
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=0.7 * cm,
+        leftMargin=0.7 * cm,
+        topMargin=0.7 * cm,
+        bottomMargin=0.7 * cm,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("TituloRelatorio", parent=styles["Heading2"], alignment=TA_CENTER, fontSize=13, leading=16, spaceAfter=6)
+    subtitle_style = ParagraphStyle("SubtituloRelatorio", parent=styles["BodyText"], alignment=TA_CENTER, fontSize=8, leading=10, textColor=colors.HexColor("#666666"), spaceAfter=8)
+    cell_style = ParagraphStyle("CelulaTabela", parent=styles["BodyText"], fontSize=6.3, leading=7.5, wordWrap="CJK")
+    header_style = ParagraphStyle("CabecalhoTabela", parent=cell_style, alignment=TA_CENTER, fontName="Helvetica-Bold", textColor=colors.white)
+
+    df_pdf = _prepare_df_for_pdf(df_in, max_rows=max_rows)
+
+    data = [[Paragraph(html.escape(str(c)), header_style) for c in df_pdf.columns]]
+    for _, row in df_pdf.iterrows():
+        data.append([Paragraph(html.escape(str(v)), cell_style) for v in row.tolist()])
+
+    page_width = landscape(A4)[0] - (1.4 * cm)
+    n_cols = max(len(df_pdf.columns), 1)
+    col_widths = [page_width / n_cols] * n_cols
+
+    tabela = Table(data, colWidths=col_widths, repeatRows=1, splitByRow=True)
+    tabela.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 6.3),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D9D9D9")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FB")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+
+    story = [Paragraph(html.escape(titulo), title_style)]
+    if subtitulo:
+        story.append(Paragraph(html.escape(subtitulo), subtitle_style))
+    story.extend([Spacer(1, 0.2 * cm), tabela])
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def dashboard_to_pdf_bytes(sections: list[dict], titulo: str = "Dashboard Completo - Única", subtitulo: str = "") -> bytes:
+    colors, TA_CENTER, TA_LEFT, A4, landscape, getSampleStyleSheet, ParagraphStyle, cm, SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak = _pdf_imports()
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=0.7 * cm,
+        leftMargin=0.7 * cm,
+        topMargin=0.7 * cm,
+        bottomMargin=0.7 * cm,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("TituloDash", parent=styles["Title"], alignment=TA_CENTER, fontSize=16, leading=19, spaceAfter=8)
+    subtitle_style = ParagraphStyle("SubtituloDash", parent=styles["BodyText"], alignment=TA_CENTER, fontSize=8, leading=10, textColor=colors.HexColor("#666666"), spaceAfter=10)
+    section_style = ParagraphStyle("SecaoDash", parent=styles["Heading2"], alignment=TA_LEFT, fontSize=11, leading=13, spaceBefore=8, spaceAfter=5, textColor=colors.HexColor("#1F4E79"))
+    cell_style = ParagraphStyle("CelulaDash", parent=styles["BodyText"], fontSize=6.0, leading=7.2, wordWrap="CJK")
+    header_style = ParagraphStyle("HeaderDash", parent=cell_style, alignment=TA_CENTER, fontName="Helvetica-Bold", textColor=colors.white)
+
+    story = [Paragraph(html.escape(titulo), title_style)]
+    if subtitulo:
+        story.append(Paragraph(html.escape(subtitulo), subtitle_style))
+    story.append(Spacer(1, 0.2 * cm))
+
+    page_width = landscape(A4)[0] - (1.4 * cm)
+
+    for i, sec in enumerate(sections):
+        name = sec.get("title", f"Seção {i+1}")
+        df_sec = sec.get("df", pd.DataFrame())
+        max_rows = sec.get("max_rows", None)
+        df_pdf = _prepare_df_for_pdf(df_sec, max_rows=max_rows)
+
+        if i > 0:
+            story.append(PageBreak())
+
+        story.append(Paragraph(html.escape(name), section_style))
+
+        if df_pdf.empty:
+            story.append(Paragraph("Sem dados para esta seção.", cell_style))
+            continue
+
+        data = [[Paragraph(html.escape(str(c)), header_style) for c in df_pdf.columns]]
+        for _, row in df_pdf.iterrows():
+            data.append([Paragraph(html.escape(str(v)), cell_style) for v in row.tolist()])
+
+        n_cols = max(len(df_pdf.columns), 1)
+        col_widths = [page_width / n_cols] * n_cols
+        tabela = Table(data, colWidths=col_widths, repeatRows=1, splitByRow=True)
+        tabela.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 6.0),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D9D9D9")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FB")]),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        story.append(tabela)
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def botao_download_pdf(df_in: pd.DataFrame, titulo: str, nome_arquivo: str, subtitulo: str = "", max_rows: int | None = None):
+    try:
+        pdf_bytes = dataframe_to_pdf_bytes(df_in, titulo=titulo, subtitulo=subtitulo, max_rows=max_rows)
+        st.download_button(
+            label=f"Baixar PDF - {titulo}",
+            data=pdf_bytes,
+            file_name=nome_arquivo,
+            mime="application/pdf",
+            use_container_width=False,
+        )
+    except Exception as e:
+        st.warning(str(e))
+
+
+def add_pdf_section(title: str, df_sec: pd.DataFrame, max_rows: int | None = None):
+    if "pdf_sections" not in st.session_state:
+        st.session_state["pdf_sections"] = []
+    try:
+        st.session_state["pdf_sections"].append({"title": title, "df": df_sec.copy(), "max_rows": max_rows})
+    except Exception:
+        pass
+
 @st.cache_data(show_spinner=False)
 def load_base(path: str, mtime: float):
     xls = pd.ExcelFile(path)
@@ -367,6 +582,8 @@ if vendedor_sel != "TODOS" and "VENDEDOR" in df_periodo_all.columns:
 else:
     df_periodo = df_periodo_all.copy()
 
+st.session_state["pdf_sections"] = []
+
 # Base completa do ano (para tabelas Ano-1 e Metas), sem zerar meses fora do filtro de período/mês
 df_base_vendor = df.copy()
 if vendedor_sel != "TODOS" and "VENDEDOR" in df_base_vendor.columns:
@@ -436,6 +653,18 @@ with r2[2]:
         "Σ Fat ÷ Σ Custo",
     )
 
+indicadores_pdf = pd.DataFrame([
+    {"Indicador": "Faturamento (Período)", "Valor": format_brl(faturamento_periodo), "Observação": f"{dt_ini} → {dt_fim}"},
+    {"Indicador": "Ano Atual (no período)", "Valor": str(ano_atual), "Observação": "Base: DATA filtrada"},
+    {"Indicador": "Vendedor (filtro)", "Valor": vendedor_sel, "Observação": "TODOS = sem recorte"},
+    {"Indicador": "Clientes Ativos (período)", "Valor": f"{clientes_ativos:,}".replace(",", "."), "Observação": "Clientes únicos"},
+    {"Indicador": "Média diária (dias c/ venda)", "Valor": format_brl(media_dia), "Observação": "Ignora dias zerados"},
+    {"Indicador": f"Previsão (mês {mes_ref})", "Valor": format_brl(previsao_mes), "Observação": f"{dias_uteis_ref} dias úteis"},
+    {"Indicador": "Markup (Fat/Custo)", "Valor": ("—" if markup is None else f"{markup:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")), "Observação": "Σ Fat ÷ Σ Custo"},
+])
+add_pdf_section("Indicadores", indicadores_pdf)
+
+
 # =========================
 # INDICADORES COMPLEMENTARES — Vendedores e Dias de Venda
 # =========================
@@ -468,6 +697,8 @@ with cc1:
 
         st.caption("Considera o período selecionado.")
         st.dataframe(rank_vend_show, use_container_width=True, hide_index=True)
+        botao_download_pdf(rank_vend_show, "Ranking de Vendedores", "ranking_vendedores.pdf")
+        add_pdf_section("Ranking de Vendedores", rank_vend_show)
     else:
         st.info("Coluna VENDEDOR não encontrada para montar o ranking.")
 
@@ -504,6 +735,11 @@ with cc2:
             })
             st.caption("Ao clicar na coluna DIA, a ordenação respeita a data real (do mais antigo para o mais novo).")
             st.dataframe(sty_dias, use_container_width=True, hide_index=True)
+            dias_pdf = dias_show.copy()
+            dias_pdf["DIA"] = dias_pdf["DIA"].apply(lambda x: pd.to_datetime(x).strftime("%d/%m/%Y") if pd.notna(x) else "—")
+            dias_pdf["VENDAS (R$)"] = dias_pdf["VENDAS (R$)"].map(format_brl)
+            botao_download_pdf(dias_pdf, "Dias de Venda", "dias_de_venda.pdf")
+            add_pdf_section("Dias de Venda", dias_pdf)
     else:
         st.info("Sem dados para montar a tabela de dias de venda.")
 
@@ -552,6 +788,10 @@ with st.expander("Abrir tabela Ano-1 vs Ano Atual (por mês)"):
     )
     sty = style_diff_column(df_disp, "DIF (R$)").format({"DIF (R$)": lambda x: format_brl(x)})
     st.dataframe(sty, use_container_width=True, hide_index=True)
+    ano1_pdf = df_disp.copy()
+    ano1_pdf["DIF (R$)"] = ano1_pdf["DIF (R$)"].map(format_brl)
+    botao_download_pdf(ano1_pdf, "Ano-1 vs Ano Atual", "ano_1_vs_ano_atual.pdf")
+    add_pdf_section("Ano-1 vs Ano Atual", ano1_pdf)
 st.divider()
 # =========================
 # SEÇÃO 3 — Metas
@@ -607,6 +847,10 @@ with st.expander("Abrir tabela Meta x Realizado (por mês)"):
     )
     sty = style_diff_column(df_disp, "DIF (R$)").format({"DIF (R$)": lambda x: format_brl(x)})
     st.dataframe(sty, use_container_width=True, hide_index=True)
+    metas_pdf = df_disp.copy()
+    metas_pdf["DIF (R$)"] = metas_pdf["DIF (R$)"].map(format_brl)
+    botao_download_pdf(metas_pdf, "Meta x Realizado", "meta_x_realizado.pdf")
+    add_pdf_section("Meta x Realizado", metas_pdf)
 st.divider()
 # =========================
 # SEÇÃO 4 — Produtos (Marcas / Segmentos)
@@ -628,6 +872,8 @@ with cA:
         top10_show["FAT (R$)"] = top10_show["FAT (R$)"].map(format_brl)
         top10_show["% SOBRE TOTAL"] = top10["% SOBRE TOTAL"].apply(fmt_pct)
         st.dataframe(top10_show, use_container_width=True, hide_index=True)
+        botao_download_pdf(top10_show, "Top 10 Marcas", "top_10_marcas.pdf")
+        add_pdf_section("Top 10 Marcas", top10_show)
         resto = marcas.iloc[10:].copy()
         if not resto.empty:
             with st.expander("Ver demais marcas (drill)"):
@@ -635,6 +881,8 @@ with cA:
                 resto_show["FAT (R$)"] = resto_show["FAT (R$)"].map(format_brl)
                 resto_show["% SOBRE TOTAL"] = resto["% SOBRE TOTAL"].apply(fmt_pct)
                 st.dataframe(resto_show, use_container_width=True, hide_index=True)
+                botao_download_pdf(resto_show, "Demais Marcas", "demais_marcas.pdf", max_rows=None)
+                add_pdf_section("Drill - Demais Marcas", resto_show)
     else:
         st.info("Sem dados (ou coluna MARCA ausente) para o período/vendedor selecionado.")
 with cB:
@@ -655,6 +903,12 @@ with cB:
         )
         fig_seg.update_layout(height=420)
         st.plotly_chart(fig_seg, use_container_width=True)
+        seg_show = seg.copy()
+        total_seg = float(seg_show["FAT (R$)"].sum()) if not seg_show.empty else 0.0
+        seg_show["% SOBRE TOTAL"] = seg_show["FAT (R$)"].apply(lambda x: (x / total_seg * 100) if total_seg else None).apply(fmt_pct)
+        seg_show["FAT (R$)"] = seg_show["FAT (R$)"].map(format_brl)
+        botao_download_pdf(seg_show, "Faturamento por Segmento", "faturamento_por_segmento.pdf")
+        add_pdf_section("Faturamento por Segmento", seg_show)
     else:
         st.info("Sem dados (ou coluna SEGMENTO ausente) para o período/vendedor selecionado.")
 
@@ -674,6 +928,8 @@ if (not df_periodo.empty) and ("LINHA" in df_periodo.columns):
     top10_linhas_show["FAT (R$)"] = top10_linhas_show["FAT (R$)"].map(format_brl)
     top10_linhas_show["% SOBRE TOTAL"] = top10_linhas["% SOBRE TOTAL"].apply(fmt_pct)
     st.dataframe(top10_linhas_show, use_container_width=True, hide_index=True)
+    botao_download_pdf(top10_linhas_show, "Top 10 Linhas", "top_10_linhas.pdf")
+    add_pdf_section("Top 10 Linhas", top10_linhas_show)
 
     with st.expander("Drill: marcas que performaram dentro da linha (e % sobre a linha)"):
         linhas_opts = (
@@ -700,6 +956,8 @@ if (not df_periodo.empty) and ("LINHA" in df_periodo.columns):
             top_m_show["% SOBRE LINHA"] = top_m["% SOBRE LINHA"].apply(fmt_pct)
             st.metric("Total da linha (período)", format_brl(total_linha))
             st.dataframe(top_m_show, use_container_width=True, hide_index=True)
+            botao_download_pdf(top_m_show, f"Drill Linha - {linha_sel}", f"drill_linha_{str(linha_sel).replace(' ', '_')}.pdf")
+            add_pdf_section(f"Drill Linha Selecionada - {linha_sel}", top_m_show)
 
             resto_m = marcas_linha.iloc[15:].copy()
             if not resto_m.empty:
@@ -708,6 +966,8 @@ if (not df_periodo.empty) and ("LINHA" in df_periodo.columns):
                     resto_m_show["FAT (R$)"] = resto_m_show["FAT (R$)"].map(format_brl)
                     resto_m_show["% SOBRE LINHA"] = resto_m["% SOBRE LINHA"].apply(fmt_pct)
                     st.dataframe(resto_m_show, use_container_width=True, hide_index=True)
+                    botao_download_pdf(resto_m_show, f"Demais Marcas na Linha - {linha_sel}", f"demais_marcas_linha_{str(linha_sel).replace(' ', '_')}.pdf")
+                    add_pdf_section(f"Drill - Demais Marcas na Linha {linha_sel}", resto_m_show)
 else:
     st.info("Sem dados (ou coluna LINHA ausente) para montar Top 10 Linhas no período/vendedor selecionado.")
 
@@ -783,6 +1043,8 @@ if has_city and has_bairro and has_cliente:
             cli_reg_show["FAT (R$)"] = cli_reg_show["FAT (R$)"].map(format_brl)
             st.metric("Clientes na região (únicos)", f"{cli_reg['CLIENTE'].nunique():,}".replace(",", "."))
             st.dataframe(cli_reg_show, use_container_width=True, hide_index=True)
+            botao_download_pdf(cli_reg_show, "Clientes por Região Selecionada", "clientes_regiao_selecionada.pdf")
+            add_pdf_section("Clientes por Região Selecionada", cli_reg_show)
     st.divider()
     # ===== Evolução de Clientes (DRILL) =====
     st.subheader("Evolução de Clientes (drill)")
@@ -839,6 +1101,8 @@ if has_city and has_bairro and has_cliente:
                 evo_show[m] = evo_show[m].apply(fmt_num_ptbr)
 
             st.dataframe(evo_show, use_container_width=True, hide_index=True)
+            botao_download_pdf(evo_show, f"Evolução de Clientes {ano_pick}", f"evolucao_clientes_{ano_pick}.pdf", max_rows=None)
+            add_pdf_section(f"Evolução de Clientes {ano_pick}", evo_show, max_rows=None)
     else:
         st.info("Sem dados/coluna CLIENTE para montar Evolução de Clientes.")
 
@@ -890,11 +1154,14 @@ if (not df_periodo.empty) and ("CLIENTE" in df_periodo.columns):
     base_cli_show = base_cli.copy()
     base_cli_show["FAT (R$)"] = base_cli_show["FAT (R$)"].map(format_brl)
     base_cli_show["% SOBRE TOTAL"] = base_cli["% SOBRE TOTAL"].apply(fmt_pct)
+    ranking_clientes_pdf = base_cli_show[["CLIENTE", "FAT (R$)", "% SOBRE TOTAL", "MARCA TOP", "LINHA TOP"]].copy()
     st.dataframe(
-        base_cli_show[["CLIENTE", "FAT (R$)", "% SOBRE TOTAL", "MARCA TOP", "LINHA TOP"]],
+        ranking_clientes_pdf,
         use_container_width=True,
         hide_index=True
     )
+    botao_download_pdf(ranking_clientes_pdf, "Ranking de Clientes", "ranking_clientes.pdf", max_rows=None)
+    add_pdf_section("Ranking de Clientes", ranking_clientes_pdf, max_rows=None)
 
 
     with st.expander("Drill do cliente: (1) top marca/linha + (2) dentro da linha → marcas que ele compra"):
@@ -924,6 +1191,8 @@ if (not df_periodo.empty) and ("CLIENTE" in df_periodo.columns):
                 marcas_c_show["% SOBRE CLIENTE"] = marcas_c.head(15)["% SOBRE CLIENTE"].apply(fmt_pct)
                 st.markdown("**Marcas mais compradas pelo cliente (TOP 15)**")
                 st.dataframe(marcas_c_show, use_container_width=True, hide_index=True)
+                botao_download_pdf(marcas_c_show, f"Marcas do Cliente - {cli_sel}", f"marcas_cliente_{str(cli_sel).replace(' ', '_')}.pdf")
+                add_pdf_section(f"Drill Cliente - Marcas - {cli_sel}", marcas_c_show)
 
             if "LINHA" in df_c.columns:
                 linhas_c = (
@@ -937,6 +1206,8 @@ if (not df_periodo.empty) and ("CLIENTE" in df_periodo.columns):
                 linhas_c_show["% SOBRE CLIENTE"] = linhas_c.head(15)["% SOBRE CLIENTE"].apply(fmt_pct)
                 st.markdown("**Linhas mais compradas pelo cliente (TOP 15)**")
                 st.dataframe(linhas_c_show, use_container_width=True, hide_index=True)
+                botao_download_pdf(linhas_c_show, f"Linhas do Cliente - {cli_sel}", f"linhas_cliente_{str(cli_sel).replace(' ', '_')}.pdf")
+                add_pdf_section(f"Drill Cliente - Linhas - {cli_sel}", linhas_c_show)
 
                 # Dentro da linha → marcas do cliente
                 if "MARCA" in df_c.columns:
@@ -958,6 +1229,8 @@ if (not df_periodo.empty) and ("CLIENTE" in df_periodo.columns):
                         marcas_in_linha_show["% SOBRE LINHA (CLIENTE)"] = marcas_in_linha["% SOBRE LINHA (CLIENTE)"].apply(fmt_pct)
                         st.metric("Total do cliente na linha selecionada", format_brl(total_linha_cli))
                         st.dataframe(marcas_in_linha_show, use_container_width=True, hide_index=True)
+                        botao_download_pdf(marcas_in_linha_show, f"Marcas do Cliente na Linha - {linha_cli_sel}", f"marcas_cliente_linha_{str(linha_cli_sel).replace(' ', '_')}.pdf")
+                        add_pdf_section(f"Drill Cliente - Marcas na Linha {linha_cli_sel}", marcas_in_linha_show)
                     else:
                         st.info("O cliente não tem linhas registradas no filtro atual.")
                 else:
@@ -1005,6 +1278,8 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
         cli_show["% SOBRE A MARCA"] = cli_show["% SOBRE A MARCA"].apply(fmt_pct)
 
         st.dataframe(cli_show, use_container_width=True, hide_index=True)
+        botao_download_pdf(cli_show, f"Clientes da Marca - {marca_sel}", f"clientes_marca_{str(marca_sel).replace(' ', '_')}.pdf")
+        add_pdf_section(f"Análise por Marca - Clientes - {marca_sel}", cli_show)
 
     # ---- (2) Seleciona Cliente → Linhas dentro da Marca ----
     with col2:
@@ -1051,6 +1326,8 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
 
             st.markdown(f"**Linhas mais compradas por {cliente_lbl} dentro da marca {marca_sel}**")
             st.dataframe(linhas_show, use_container_width=True, hide_index=True)
+            botao_download_pdf(linhas_show, f"Linhas na Marca - {marca_sel}", f"linhas_marca_{str(marca_sel).replace(' ', '_')}.pdf")
+            add_pdf_section(f"Análise por Marca - Linhas - {marca_sel} - {cliente_lbl}", linhas_show)
 
 
             # ---- (3) Produtos dentro da linha (para o cliente selecionado, dentro da marca) ----
@@ -1123,11 +1400,14 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                     prod_show["QTD"] = prod_show["QTD"].apply(lambda v: "-" if pd.isna(v) else f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
                     # Mostrar descrição no dashboard (código é a chave)
+                    produtos_marca_pdf = prod_show[["DESCRICAO", "CODIGO", "QTD", "FAT (R$)", "% SOBRE LINHA (CLIENTE)"]].copy()
                     st.dataframe(
-                        prod_show[["DESCRICAO", "CODIGO", "QTD", "FAT (R$)", "% SOBRE LINHA (CLIENTE)"]],
+                        produtos_marca_pdf,
                         use_container_width=True,
                         hide_index=True
                     )
+                    botao_download_pdf(produtos_marca_pdf, f"Produtos - {marca_sel} - {linha_prod_sel}", f"produtos_{str(marca_sel).replace(' ', '_')}_{str(linha_prod_sel).replace(' ', '_')}.pdf")
+                    add_pdf_section(f"Análise por Marca - Produtos - {marca_sel} - {linha_prod_sel}", produtos_marca_pdf)
 
                     resto_p = prod_tbl.iloc[50:].copy()
                     if not resto_p.empty:
@@ -1136,13 +1416,39 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                             resto_p_show["FAT (R$)"] = resto_p_show["FAT (R$)"].map(format_brl)
                             resto_p_show["% SOBRE LINHA (CLIENTE)"] = resto_p_show["% SOBRE LINHA (CLIENTE)"].apply(fmt_pct)
                             resto_p_show["QTD"] = resto_p_show["QTD"].apply(lambda v: "-" if pd.isna(v) else f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                            demais_produtos_pdf = resto_p_show[["DESCRICAO", "CODIGO", "QTD", "FAT (R$)", "% SOBRE LINHA (CLIENTE)"]].copy()
                             st.dataframe(
-                                resto_p_show[["DESCRICAO", "CODIGO", "QTD", "FAT (R$)", "% SOBRE LINHA (CLIENTE)"]],
+                                demais_produtos_pdf,
                                 use_container_width=True,
                                 hide_index=True
                             )
+                            botao_download_pdf(demais_produtos_pdf, f"Demais Produtos - {marca_sel} - {linha_prod_sel}", f"demais_produtos_{str(marca_sel).replace(' ', '_')}_{str(linha_prod_sel).replace(' ', '_')}.pdf")
+                            add_pdf_section(f"Análise por Marca - Demais Produtos - {marca_sel} - {linha_prod_sel}", demais_produtos_pdf)
             else:
                 st.info("Não encontrei colunas de **código** e/ou **descrição** do produto na base para detalhar produtos dentro da linha. (Procurei por variações de 'COD*' e 'DESCR*' após normalização.)")
 else:
     st.info("Preciso das colunas MARCA, CLIENTE e LINHA para montar a análise por marca.")
 
+
+
+# =========================
+# EXPORTAÇÃO PDF — DASH COMPLETO
+# =========================
+st.divider()
+st.markdown("## Exportar Dashboard Completo")
+st.caption("O PDF completo consolida os indicadores, tabelas principais e os drills/tabelas atualmente selecionados no dashboard.")
+try:
+    pdf_dash = dashboard_to_pdf_bytes(
+        st.session_state.get("pdf_sections", []),
+        titulo="Dashboard Completo - Única",
+        subtitulo=f"Período: {dt_ini} a {dt_fim} | Vendedor: {vendedor_sel} | Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+    )
+    st.download_button(
+        label="Baixar PDF - Dashboard Completo",
+        data=pdf_dash,
+        file_name="dashboard_completo_unica.pdf",
+        mime="application/pdf",
+        use_container_width=False,
+    )
+except Exception as e:
+    st.warning(str(e))
