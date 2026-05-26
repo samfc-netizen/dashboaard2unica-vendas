@@ -584,6 +584,144 @@ else:
 
 st.session_state["pdf_sections"] = []
 
+
+# =========================
+# AGENTE DE BI — Perguntas rápidas
+# =========================
+def _business_days_count(start_date, end_date):
+    try:
+        dias = pd.date_range(start=start_date, end=end_date, freq="B")
+        return int(len(dias))
+    except Exception:
+        return 0
+
+
+def _top_group_answer(df_base: pd.DataFrame, col_name: str, label: str, top_n: int = 10):
+    if df_base is None or df_base.empty:
+        return None, pd.DataFrame()
+    if col_name not in df_base.columns:
+        return f"Não encontrei a coluna {col_name} na base para responder essa pergunta.", pd.DataFrame()
+
+    tmp = df_base.copy()
+    tmp[col_name] = tmp[col_name].fillna("N/I").astype(str).map(norm_text).replace("", "N/I")
+    rank = (
+        tmp.groupby(col_name, as_index=False)["VR_TOTAL"].sum()
+        .rename(columns={col_name: label, "VR_TOTAL": "FAT_NUM"})
+        .sort_values("FAT_NUM", ascending=False)
+        .head(top_n)
+    )
+    if rank.empty:
+        return "Não encontrei vendas para montar esse ranking.", pd.DataFrame()
+
+    total = float(tmp["VR_TOTAL"].sum()) if not tmp.empty else 0.0
+    rank["% SOBRE TOTAL"] = rank["FAT_NUM"].apply(lambda x: (x / total * 100) if total else None)
+    rank_show = rank.copy()
+    rank_show.insert(0, "RANK", range(1, len(rank_show) + 1))
+    rank_show["FATURAMENTO"] = rank_show["FAT_NUM"].map(format_brl)
+    rank_show["% SOBRE TOTAL"] = rank_show["% SOBRE TOTAL"].apply(fmt_pct)
+    rank_show = rank_show[["RANK", label, "FATURAMENTO", "% SOBRE TOTAL"]]
+    top = rank.iloc[0]
+    answer = f"O top {label.lower()} foi **{top[label]}**, com **{format_brl(top['FAT_NUM'])}**."
+    return answer, rank_show
+
+
+def _render_bi_agent(df_base_all: pd.DataFrame, vendedor_filtro: str = "TODOS"):
+    st.divider()
+    st.markdown("## Agente de BI")
+    st.caption("Pergunte sobre vendas de hoje, top clientes, venda do mês, previsão de fechamento, marcas e linhas.")
+
+    hoje = pd.Timestamp.today().date()
+    mes_atual = hoje.month
+    ano_atual_agent = hoje.year
+    mes_nome = month_key_from_monthnum(mes_atual)
+
+    df_agent = df_base_all.copy()
+    if vendedor_filtro != "TODOS" and "VENDEDOR" in df_agent.columns:
+        df_agent = df_agent[df_agent["VENDEDOR"].fillna("").astype(str).map(norm_text) == norm_text(vendedor_filtro)].copy()
+
+    df_hoje = df_agent[df_agent["DIA"] == hoje].copy()
+    df_mes = df_agent[(df_agent["ANO"] == ano_atual_agent) & (df_agent["MES_NUM"] == mes_atual)].copy()
+
+    perguntas = [
+        "Quanto vendeu hoje",
+        "Qual top cliente de hoje",
+        "Qual top cliente do mês",
+        "Qual venda do mês",
+        "Qual previsão de fechamento de vendas?",
+        "Quais marcas mais vendeu hoje?",
+        "Quais linhas venderam hoje",
+    ]
+
+    col_q1, col_q2 = st.columns([1.35, 1])
+    with col_q1:
+        pergunta_sel = st.selectbox("Perguntas prontas", perguntas, key="AGENTE_BI_PERGUNTA_SEL")
+    with col_q2:
+        pergunta_livre = st.text_input("Ou digite sua pergunta", placeholder="Ex.: quanto vendeu hoje?", key="AGENTE_BI_PERGUNTA_LIVRE")
+
+    pergunta = pergunta_livre.strip() if pergunta_livre.strip() else pergunta_sel
+    pergunta_norm = normalize_col(pergunta)
+
+    st.chat_message("user").write(pergunta)
+    with st.chat_message("assistant"):
+        if "VENDEU HOJE" in pergunta_norm or "VENDA HOJE" in pergunta_norm:
+            venda_hoje = float(df_hoje["VR_TOTAL"].sum()) if not df_hoje.empty else 0.0
+            qtd_linhas = len(df_hoje)
+            clientes_hoje = df_hoje["CLIENTE"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().nunique() if "CLIENTE" in df_hoje.columns else 0
+            st.markdown(f"**Hoje ({hoje.strftime('%d/%m/%Y')}) vendeu {format_brl(venda_hoje)}.**")
+            st.caption(f"Registros de venda: {qtd_linhas} | Clientes atendidos: {clientes_hoje}")
+
+        elif "TOP CLIENTE" in pergunta_norm and "HOJE" in pergunta_norm:
+            resposta, tabela = _top_group_answer(df_hoje, "CLIENTE", "CLIENTE", top_n=10)
+            st.markdown(resposta or f"Não encontrei vendas hoje ({hoje.strftime('%d/%m/%Y')}).")
+            if not tabela.empty:
+                st.dataframe(tabela, use_container_width=True, hide_index=True)
+
+        elif "TOP CLIENTE" in pergunta_norm and ("MES" in pergunta_norm or "MÊS" in pergunta):
+            resposta, tabela = _top_group_answer(df_mes, "CLIENTE", "CLIENTE", top_n=10)
+            st.markdown(resposta or f"Não encontrei vendas no mês atual ({mes_nome}/{ano_atual_agent}).")
+            if not tabela.empty:
+                st.dataframe(tabela, use_container_width=True, hide_index=True)
+
+        elif "VENDA DO MES" in pergunta_norm or "VENDA MES" in pergunta_norm or "VENDAS DO MES" in pergunta_norm:
+            venda_mes = float(df_mes["VR_TOTAL"].sum()) if not df_mes.empty else 0.0
+            clientes_mes = df_mes["CLIENTE"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().nunique() if "CLIENTE" in df_mes.columns else 0
+            dias_com_venda = df_mes.groupby("DIA")["VR_TOTAL"].sum() if not df_mes.empty else pd.Series(dtype=float)
+            dias_com_venda = int((dias_com_venda > 0).sum()) if not dias_com_venda.empty else 0
+            st.markdown(f"**A venda do mês ({mes_nome}/{ano_atual_agent}) está em {format_brl(venda_mes)}.**")
+            st.caption(f"Dias com venda: {dias_com_venda} | Clientes ativos no mês: {clientes_mes}")
+
+        elif "PREVISAO" in pergunta_norm or "FECHAMENTO" in pergunta_norm:
+            venda_mes = float(df_mes["VR_TOTAL"].sum()) if not df_mes.empty else 0.0
+            inicio_mes = pd.Timestamp(year=ano_atual_agent, month=mes_atual, day=1).date()
+            fim_mes = (pd.Timestamp(year=ano_atual_agent, month=mes_atual, day=1) + pd.offsets.MonthEnd(0)).date()
+            dias_uteis_total = _business_days_count(inicio_mes, fim_mes)
+            dias_venda = df_mes.groupby("DIA", as_index=False)["VR_TOTAL"].sum() if not df_mes.empty else pd.DataFrame(columns=["DIA", "VR_TOTAL"])
+            dias_venda = dias_venda[dias_venda["VR_TOTAL"] > 0]
+            dias_realizados = int(len(dias_venda))
+            media_dia = float(dias_venda["VR_TOTAL"].mean()) if dias_realizados else 0.0
+            previsao = media_dia * dias_uteis_total
+            st.markdown(f"**A previsão de fechamento de vendas para {mes_nome}/{ano_atual_agent} é {format_brl(previsao)}.**")
+            st.caption(f"Realizado até agora: {format_brl(venda_mes)} | Média dos dias com venda: {format_brl(media_dia)} | Dias úteis do mês: {dias_uteis_total}")
+
+        elif "MARCA" in pergunta_norm and "HOJE" in pergunta_norm:
+            resposta, tabela = _top_group_answer(df_hoje, "MARCA", "MARCA", top_n=10)
+            st.markdown(resposta or f"Não encontrei vendas hoje ({hoje.strftime('%d/%m/%Y')}) para ranking de marcas.")
+            if not tabela.empty:
+                st.dataframe(tabela, use_container_width=True, hide_index=True)
+
+        elif "LINHA" in pergunta_norm and "HOJE" in pergunta_norm:
+            resposta, tabela = _top_group_answer(df_hoje, "LINHA", "LINHA", top_n=10)
+            st.markdown(resposta or f"Não encontrei vendas hoje ({hoje.strftime('%d/%m/%Y')}) para ranking de linhas.")
+            if not tabela.empty:
+                st.dataframe(tabela, use_container_width=True, hide_index=True)
+
+        else:
+            st.info("Ainda não tenho rota para essa pergunta. Use uma das perguntas prontas: venda de hoje, top cliente de hoje, top cliente do mês, venda do mês, previsão, marcas de hoje ou linhas de hoje.")
+
+    st.caption("Observação: o agente considera a data atual do ambiente onde o app está rodando e respeita o filtro de vendedor, quando selecionado.")
+
+_render_bi_agent(df, vendedor_sel)
+
 # Base completa do ano (para tabelas Ano-1 e Metas), sem zerar meses fora do filtro de período/mês
 df_base_vendor = df.copy()
 if vendedor_sel != "TODOS" and "VENDEDOR" in df_base_vendor.columns:
