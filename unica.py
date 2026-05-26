@@ -584,144 +584,6 @@ else:
 
 st.session_state["pdf_sections"] = []
 
-
-# =========================
-# AGENTE DE BI — Perguntas rápidas
-# =========================
-def _business_days_count(start_date, end_date):
-    try:
-        dias = pd.date_range(start=start_date, end=end_date, freq="B")
-        return int(len(dias))
-    except Exception:
-        return 0
-
-
-def _top_group_answer(df_base: pd.DataFrame, col_name: str, label: str, top_n: int = 10):
-    if df_base is None or df_base.empty:
-        return None, pd.DataFrame()
-    if col_name not in df_base.columns:
-        return f"Não encontrei a coluna {col_name} na base para responder essa pergunta.", pd.DataFrame()
-
-    tmp = df_base.copy()
-    tmp[col_name] = tmp[col_name].fillna("N/I").astype(str).map(norm_text).replace("", "N/I")
-    rank = (
-        tmp.groupby(col_name, as_index=False)["VR_TOTAL"].sum()
-        .rename(columns={col_name: label, "VR_TOTAL": "FAT_NUM"})
-        .sort_values("FAT_NUM", ascending=False)
-        .head(top_n)
-    )
-    if rank.empty:
-        return "Não encontrei vendas para montar esse ranking.", pd.DataFrame()
-
-    total = float(tmp["VR_TOTAL"].sum()) if not tmp.empty else 0.0
-    rank["% SOBRE TOTAL"] = rank["FAT_NUM"].apply(lambda x: (x / total * 100) if total else None)
-    rank_show = rank.copy()
-    rank_show.insert(0, "RANK", range(1, len(rank_show) + 1))
-    rank_show["FATURAMENTO"] = rank_show["FAT_NUM"].map(format_brl)
-    rank_show["% SOBRE TOTAL"] = rank_show["% SOBRE TOTAL"].apply(fmt_pct)
-    rank_show = rank_show[["RANK", label, "FATURAMENTO", "% SOBRE TOTAL"]]
-    top = rank.iloc[0]
-    answer = f"O top {label.lower()} foi **{top[label]}**, com **{format_brl(top['FAT_NUM'])}**."
-    return answer, rank_show
-
-
-def _render_bi_agent(df_base_all: pd.DataFrame, vendedor_filtro: str = "TODOS"):
-    st.divider()
-    st.markdown("## Agente de BI")
-    st.caption("Pergunte sobre vendas de hoje, top clientes, venda do mês, previsão de fechamento, marcas e linhas.")
-
-    hoje = pd.Timestamp.today().date()
-    mes_atual = hoje.month
-    ano_atual_agent = hoje.year
-    mes_nome = month_key_from_monthnum(mes_atual)
-
-    df_agent = df_base_all.copy()
-    if vendedor_filtro != "TODOS" and "VENDEDOR" in df_agent.columns:
-        df_agent = df_agent[df_agent["VENDEDOR"].fillna("").astype(str).map(norm_text) == norm_text(vendedor_filtro)].copy()
-
-    df_hoje = df_agent[df_agent["DIA"] == hoje].copy()
-    df_mes = df_agent[(df_agent["ANO"] == ano_atual_agent) & (df_agent["MES_NUM"] == mes_atual)].copy()
-
-    perguntas = [
-        "Quanto vendeu hoje",
-        "Qual top cliente de hoje",
-        "Qual top cliente do mês",
-        "Qual venda do mês",
-        "Qual previsão de fechamento de vendas?",
-        "Quais marcas mais vendeu hoje?",
-        "Quais linhas venderam hoje",
-    ]
-
-    col_q1, col_q2 = st.columns([1.35, 1])
-    with col_q1:
-        pergunta_sel = st.selectbox("Perguntas prontas", perguntas, key="AGENTE_BI_PERGUNTA_SEL")
-    with col_q2:
-        pergunta_livre = st.text_input("Ou digite sua pergunta", placeholder="Ex.: quanto vendeu hoje?", key="AGENTE_BI_PERGUNTA_LIVRE")
-
-    pergunta = pergunta_livre.strip() if pergunta_livre.strip() else pergunta_sel
-    pergunta_norm = normalize_col(pergunta)
-
-    st.chat_message("user").write(pergunta)
-    with st.chat_message("assistant"):
-        if "VENDEU HOJE" in pergunta_norm or "VENDA HOJE" in pergunta_norm:
-            venda_hoje = float(df_hoje["VR_TOTAL"].sum()) if not df_hoje.empty else 0.0
-            qtd_linhas = len(df_hoje)
-            clientes_hoje = df_hoje["CLIENTE"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().nunique() if "CLIENTE" in df_hoje.columns else 0
-            st.markdown(f"**Hoje ({hoje.strftime('%d/%m/%Y')}) vendeu {format_brl(venda_hoje)}.**")
-            st.caption(f"Registros de venda: {qtd_linhas} | Clientes atendidos: {clientes_hoje}")
-
-        elif "TOP CLIENTE" in pergunta_norm and "HOJE" in pergunta_norm:
-            resposta, tabela = _top_group_answer(df_hoje, "CLIENTE", "CLIENTE", top_n=10)
-            st.markdown(resposta or f"Não encontrei vendas hoje ({hoje.strftime('%d/%m/%Y')}).")
-            if not tabela.empty:
-                st.dataframe(tabela, use_container_width=True, hide_index=True)
-
-        elif "TOP CLIENTE" in pergunta_norm and ("MES" in pergunta_norm or "MÊS" in pergunta):
-            resposta, tabela = _top_group_answer(df_mes, "CLIENTE", "CLIENTE", top_n=10)
-            st.markdown(resposta or f"Não encontrei vendas no mês atual ({mes_nome}/{ano_atual_agent}).")
-            if not tabela.empty:
-                st.dataframe(tabela, use_container_width=True, hide_index=True)
-
-        elif "VENDA DO MES" in pergunta_norm or "VENDA MES" in pergunta_norm or "VENDAS DO MES" in pergunta_norm:
-            venda_mes = float(df_mes["VR_TOTAL"].sum()) if not df_mes.empty else 0.0
-            clientes_mes = df_mes["CLIENTE"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().nunique() if "CLIENTE" in df_mes.columns else 0
-            dias_com_venda = df_mes.groupby("DIA")["VR_TOTAL"].sum() if not df_mes.empty else pd.Series(dtype=float)
-            dias_com_venda = int((dias_com_venda > 0).sum()) if not dias_com_venda.empty else 0
-            st.markdown(f"**A venda do mês ({mes_nome}/{ano_atual_agent}) está em {format_brl(venda_mes)}.**")
-            st.caption(f"Dias com venda: {dias_com_venda} | Clientes ativos no mês: {clientes_mes}")
-
-        elif "PREVISAO" in pergunta_norm or "FECHAMENTO" in pergunta_norm:
-            venda_mes = float(df_mes["VR_TOTAL"].sum()) if not df_mes.empty else 0.0
-            inicio_mes = pd.Timestamp(year=ano_atual_agent, month=mes_atual, day=1).date()
-            fim_mes = (pd.Timestamp(year=ano_atual_agent, month=mes_atual, day=1) + pd.offsets.MonthEnd(0)).date()
-            dias_uteis_total = _business_days_count(inicio_mes, fim_mes)
-            dias_venda = df_mes.groupby("DIA", as_index=False)["VR_TOTAL"].sum() if not df_mes.empty else pd.DataFrame(columns=["DIA", "VR_TOTAL"])
-            dias_venda = dias_venda[dias_venda["VR_TOTAL"] > 0]
-            dias_realizados = int(len(dias_venda))
-            media_dia = float(dias_venda["VR_TOTAL"].mean()) if dias_realizados else 0.0
-            previsao = media_dia * dias_uteis_total
-            st.markdown(f"**A previsão de fechamento de vendas para {mes_nome}/{ano_atual_agent} é {format_brl(previsao)}.**")
-            st.caption(f"Realizado até agora: {format_brl(venda_mes)} | Média dos dias com venda: {format_brl(media_dia)} | Dias úteis do mês: {dias_uteis_total}")
-
-        elif "MARCA" in pergunta_norm and "HOJE" in pergunta_norm:
-            resposta, tabela = _top_group_answer(df_hoje, "MARCA", "MARCA", top_n=10)
-            st.markdown(resposta or f"Não encontrei vendas hoje ({hoje.strftime('%d/%m/%Y')}) para ranking de marcas.")
-            if not tabela.empty:
-                st.dataframe(tabela, use_container_width=True, hide_index=True)
-
-        elif "LINHA" in pergunta_norm and "HOJE" in pergunta_norm:
-            resposta, tabela = _top_group_answer(df_hoje, "LINHA", "LINHA", top_n=10)
-            st.markdown(resposta or f"Não encontrei vendas hoje ({hoje.strftime('%d/%m/%Y')}) para ranking de linhas.")
-            if not tabela.empty:
-                st.dataframe(tabela, use_container_width=True, hide_index=True)
-
-        else:
-            st.info("Ainda não tenho rota para essa pergunta. Use uma das perguntas prontas: venda de hoje, top cliente de hoje, top cliente do mês, venda do mês, previsão, marcas de hoje ou linhas de hoje.")
-
-    st.caption("Observação: o agente considera a data atual do ambiente onde o app está rodando e respeita o filtro de vendedor, quando selecionado.")
-
-_render_bi_agent(df, vendedor_sel)
-
 # Base completa do ano (para tabelas Ano-1 e Metas), sem zerar meses fora do filtro de período/mês
 df_base_vendor = df.copy()
 if vendedor_sel != "TODOS" and "VENDEDOR" in df_base_vendor.columns:
@@ -1566,6 +1428,699 @@ if (not df_periodo.empty) and ("MARCA" in df_periodo.columns) and ("CLIENTE" in 
                 st.info("Não encontrei colunas de **código** e/ou **descrição** do produto na base para detalhar produtos dentro da linha. (Procurei por variações de 'COD*' e 'DESCR*' após normalização.)")
 else:
     st.info("Preciso das colunas MARCA, CLIENTE e LINHA para montar a análise por marca.")
+
+
+
+
+
+# =========================
+# AGENTE DE BI — INTENÇÕES GERENCIAIS
+# =========================
+st.divider()
+st.markdown("## Agente de BI — Intenções Gerenciais")
+st.caption(
+    "Pergunte em linguagem natural. O agente identifica intenção por assunto + período + ação, "
+    "sem depender de perguntas exatas. Ex.: 'top clientes hoje', 'marcas do mês', 'quanto falta meta', 'linhas hoje'."
+)
+
+
+# -------------------------------------------------
+# Normalização e motor de intenções
+# -------------------------------------------------
+def _agent_normalizar_pergunta(txt: str) -> str:
+    txt = "" if txt is None else str(txt)
+    txt = unicodedata.normalize("NFKD", txt).encode("ascii", "ignore").decode("ascii")
+    txt = txt.lower().strip()
+    txt = re.sub(r"[^a-z0-9\s\-/]", " ", txt)
+    txt = re.sub(r"\s+", " ", txt)
+    return txt
+
+
+def _tem(p: str, termos) -> bool:
+    return any(t in p for t in termos)
+
+
+def _score_termos(p: str, termos) -> int:
+    return sum(1 for t in termos if t in p)
+
+
+# Mais de 30 intenções por conceito, não por pergunta exata.
+# Cada intenção combina: assunto, período e tipo de análise.
+INTENCOES_BI = {
+    "venda_hoje": {
+        "acao": ["venda", "vendeu", "faturamento", "faturou", "receita", "total"],
+        "tempo": ["hoje", "dia", "diario"],
+        "entidade": []
+    },
+    "venda_mes": {
+        "acao": ["venda", "vendeu", "faturamento", "faturou", "receita", "total"],
+        "tempo": ["mes", "mensal"],
+        "entidade": []
+    },
+    "venda_periodo": {
+        "acao": ["venda", "vendeu", "faturamento", "faturou", "receita", "total"],
+        "tempo": ["periodo", "filtro", "selecionado"],
+        "entidade": []
+    },
+    "previsao_fechamento": {
+        "acao": ["previsao", "projecao", "fechamento", "fechar", "deve fechar", "vamos fechar", "ritmo"],
+        "tempo": ["mes", "mensal", "fechamento"],
+        "entidade": []
+    },
+    "meta_falta": {
+        "acao": ["falta", "precisa", "bater", "atingir", "alcançar", "alcancar"],
+        "tempo": ["mes", "mensal", "meta"],
+        "entidade": ["meta"]
+    },
+    "meta_percentual": {
+        "acao": ["percentual", "porcentagem", "%", "atingido", "atingimos", "realizado"],
+        "tempo": ["mes", "mensal", "meta"],
+        "entidade": ["meta"]
+    },
+    "meta_projecao": {
+        "acao": ["vamos bater", "bate", "bater", "projecao", "previsao", "tendencia"],
+        "tempo": ["mes", "mensal", "meta"],
+        "entidade": ["meta"]
+    },
+    "meta_dia": {
+        "acao": ["por dia", "diaria", "diario", "precisa vender", "vender por dia"],
+        "tempo": ["mes", "mensal", "meta"],
+        "entidade": ["meta"]
+    },
+    "ano1_falta": {
+        "acao": ["falta", "superar", "crescer", "passar", "bater"],
+        "tempo": ["ano passado", "ano 1", "ano-1", "ano anterior"],
+        "entidade": []
+    },
+    "ano1_comparativo": {
+        "acao": ["comparar", "comparativo", "contra", "crescimento", "diferença", "diferenca", "variacao"],
+        "tempo": ["ano passado", "ano 1", "ano-1", "ano anterior"],
+        "entidade": []
+    },
+    "ano1_projecao": {
+        "acao": ["previsao", "projecao", "vamos superar", "tendencia", "fechamento"],
+        "tempo": ["ano passado", "ano 1", "ano-1", "ano anterior"],
+        "entidade": []
+    },
+    "cliente_hoje": {
+        "acao": ["top", "ranking", "maior", "melhor", "principais", "cliente", "clientes"],
+        "tempo": ["hoje", "dia"],
+        "entidade": ["cliente", "clientes"]
+    },
+    "cliente_mes": {
+        "acao": ["top", "ranking", "maior", "melhor", "principais", "cliente", "clientes"],
+        "tempo": ["mes", "mensal"],
+        "entidade": ["cliente", "clientes"]
+    },
+    "cliente_periodo": {
+        "acao": ["top", "ranking", "maior", "melhor", "principais", "cliente", "clientes"],
+        "tempo": ["periodo", "filtro", "selecionado"],
+        "entidade": ["cliente", "clientes"]
+    },
+    "clientes_quantidade_hoje": {
+        "acao": ["quantos", "quantidade", "ativos", "compraram"],
+        "tempo": ["hoje", "dia"],
+        "entidade": ["cliente", "clientes"]
+    },
+    "clientes_quantidade_mes": {
+        "acao": ["quantos", "quantidade", "ativos", "compraram"],
+        "tempo": ["mes", "mensal"],
+        "entidade": ["cliente", "clientes"]
+    },
+    "marca_hoje": {
+        "acao": ["top", "ranking", "mais vendeu", "mais venderam", "maior", "principais", "marca", "marcas"],
+        "tempo": ["hoje", "dia"],
+        "entidade": ["marca", "marcas"]
+    },
+    "marca_mes": {
+        "acao": ["top", "ranking", "mais vendeu", "mais venderam", "maior", "principais", "marca", "marcas"],
+        "tempo": ["mes", "mensal"],
+        "entidade": ["marca", "marcas"]
+    },
+    "marca_periodo": {
+        "acao": ["top", "ranking", "mais vendeu", "mais venderam", "maior", "principais", "marca", "marcas"],
+        "tempo": ["periodo", "filtro", "selecionado"],
+        "entidade": ["marca", "marcas"]
+    },
+    "linha_hoje": {
+        "acao": ["top", "ranking", "mais vendeu", "mais venderam", "maior", "principais", "linha", "linhas"],
+        "tempo": ["hoje", "dia"],
+        "entidade": ["linha", "linhas"]
+    },
+    "linha_mes": {
+        "acao": ["top", "ranking", "mais vendeu", "mais venderam", "maior", "principais", "linha", "linhas"],
+        "tempo": ["mes", "mensal"],
+        "entidade": ["linha", "linhas"]
+    },
+    "linha_periodo": {
+        "acao": ["top", "ranking", "mais vendeu", "mais venderam", "maior", "principais", "linha", "linhas"],
+        "tempo": ["periodo", "filtro", "selecionado"],
+        "entidade": ["linha", "linhas"]
+    },
+    "produto_hoje": {
+        "acao": ["top", "ranking", "mais vendido", "mais vendidos", "produto", "produtos", "item", "itens"],
+        "tempo": ["hoje", "dia"],
+        "entidade": ["produto", "produtos", "item", "itens"]
+    },
+    "produto_mes": {
+        "acao": ["top", "ranking", "mais vendido", "mais vendidos", "produto", "produtos", "item", "itens"],
+        "tempo": ["mes", "mensal"],
+        "entidade": ["produto", "produtos", "item", "itens"]
+    },
+    "produto_periodo": {
+        "acao": ["top", "ranking", "mais vendido", "mais vendidos", "produto", "produtos", "item", "itens"],
+        "tempo": ["periodo", "filtro", "selecionado"],
+        "entidade": ["produto", "produtos", "item", "itens"]
+    },
+    "vendedor_hoje": {
+        "acao": ["top", "ranking", "maior", "melhor", "quem mais", "vendedor", "vendedores"],
+        "tempo": ["hoje", "dia"],
+        "entidade": ["vendedor", "vendedores"]
+    },
+    "vendedor_mes": {
+        "acao": ["top", "ranking", "maior", "melhor", "quem mais", "vendedor", "vendedores"],
+        "tempo": ["mes", "mensal"],
+        "entidade": ["vendedor", "vendedores"]
+    },
+    "vendedor_periodo": {
+        "acao": ["top", "ranking", "maior", "melhor", "quem mais", "vendedor", "vendedores"],
+        "tempo": ["periodo", "filtro", "selecionado"],
+        "entidade": ["vendedor", "vendedores"]
+    },
+    "margem_hoje": {
+        "acao": ["margem", "lucro bruto", "rentabilidade"],
+        "tempo": ["hoje", "dia"],
+        "entidade": []
+    },
+    "margem_mes": {
+        "acao": ["margem", "lucro bruto", "rentabilidade"],
+        "tempo": ["mes", "mensal"],
+        "entidade": []
+    },
+    "ticket_hoje": {
+        "acao": ["ticket", "ticket medio", "media por cliente"],
+        "tempo": ["hoje", "dia"],
+        "entidade": []
+    },
+    "ticket_mes": {
+        "acao": ["ticket", "ticket medio", "media por cliente"],
+        "tempo": ["mes", "mensal"],
+        "entidade": []
+    },
+    "resumo_executivo": {
+        "acao": ["resumo", "analise", "gerencial", "executivo", "como esta", "diagnostico"],
+        "tempo": ["mes", "mensal", "periodo"],
+        "entidade": []
+    },
+    "oportunidade": {
+        "acao": ["oportunidade", "oportunidades", "onde crescer", "potencial"],
+        "tempo": ["mes", "mensal", "periodo"],
+        "entidade": []
+    },
+    "risco": {
+        "acao": ["risco", "riscos", "alerta", "problema", "atenção", "atencao"],
+        "tempo": ["mes", "mensal", "periodo"],
+        "entidade": []
+    }
+}
+
+
+SINONIMOS_ENTIDADE = {
+    "cliente": ["cliente", "clientes", "comprador", "compradores"],
+    "marca": ["marca", "marcas", "fabricante", "fornecedor"],
+    "linha": ["linha", "linhas", "categoria", "categorias", "segmento", "segmentos"],
+    "produto": ["produto", "produtos", "item", "itens", "sku", "mercadoria", "mercadorias"],
+    "vendedor": ["vendedor", "vendedores", "consultor", "consultores", "representante", "representantes"],
+    "meta": ["meta", "metas", "objetivo"],
+    "ano1": ["ano passado", "ano anterior", "ano 1", "ano-1", "2025"],
+    "margem": ["margem", "lucro bruto", "rentabilidade"],
+    "ticket": ["ticket", "ticket medio", "media por cliente"],
+}
+
+SINONIMOS_TEMPO = {
+    "hoje": ["hoje", "dia", "diario", "diaria"],
+    "mes": ["mes", "mensal", "mes atual", "este mes", "do mes"],
+    "periodo": ["periodo", "filtro", "selecionado", "geral"],
+}
+
+SINONIMOS_ACAO = {
+    "top": ["top", "ranking", "rank", "maior", "maiores", "melhor", "melhores", "principal", "principais", "quem mais", "mais vendeu", "mais venderam"],
+    "total": ["quanto", "total", "venda", "vendas", "vendeu", "faturamento", "faturou", "receita"],
+    "previsao": ["previsao", "projecao", "tendencia", "fechamento", "fechar", "ritmo", "deve fechar", "vamos fechar"],
+    "falta": ["falta", "faltam", "precisa", "necessario", "necessario", "bater", "atingir", "superar", "crescer"],
+    "comparar": ["comparar", "comparativo", "contra", "versus", "vs", "crescimento", "diferença", "diferenca", "variacao"],
+    "quantidade": ["quantos", "quantidade", "qtd", "ativos", "compraram"],
+    "analise": ["analise", "resumo", "gerencial", "executivo", "diagnostico", "como esta"],
+}
+
+
+def _detectar_entidade(p: str) -> str | None:
+    scores = {ent: _score_termos(p, termos) for ent, termos in SINONIMOS_ENTIDADE.items()}
+    ent, score = max(scores.items(), key=lambda x: x[1])
+    return ent if score > 0 else None
+
+
+def _detectar_tempo(p: str) -> str:
+    # 'hoje' precisa ter prioridade sobre 'dia' genérico quando houver conflito.
+    if _tem(p, ["hoje"]):
+        return "hoje"
+    if _tem(p, SINONIMOS_TEMPO["mes"]):
+        return "mes"
+    if _tem(p, SINONIMOS_TEMPO["periodo"]):
+        return "periodo"
+    if _tem(p, ["dia", "diario", "diaria"]):
+        return "hoje"
+    return "mes"
+
+
+def _detectar_acao(p: str) -> str:
+    scores = {acao: _score_termos(p, termos) for acao, termos in SINONIMOS_ACAO.items()}
+    acao, score = max(scores.items(), key=lambda x: x[1])
+    if score == 0:
+        return "top"
+    return acao
+
+
+def _classificar_intencao(p: str) -> dict:
+    entidade = _detectar_entidade(p)
+    tempo = _detectar_tempo(p)
+    acao = _detectar_acao(p)
+
+    # Regras gerenciais prioritárias
+    if acao == "analise" or _tem(p, ["resumo executivo", "analise gerencial", "como esta o negocio", "diagnostico"]):
+        return {"intent": "resumo_executivo", "entidade": entidade, "tempo": tempo, "acao": "analise"}
+    if entidade == "meta" and acao == "falta":
+        if _tem(p, ["por dia", "diaria", "diario", "vender por dia"]):
+            return {"intent": "meta_dia", "entidade": entidade, "tempo": tempo, "acao": acao}
+        return {"intent": "meta_falta", "entidade": entidade, "tempo": tempo, "acao": acao}
+    if entidade == "meta" and acao == "previsao":
+        return {"intent": "meta_projecao", "entidade": entidade, "tempo": tempo, "acao": acao}
+    if entidade == "meta":
+        return {"intent": "meta_percentual", "entidade": entidade, "tempo": tempo, "acao": acao}
+    if entidade == "ano1" and acao == "previsao":
+        return {"intent": "ano1_projecao", "entidade": entidade, "tempo": tempo, "acao": acao}
+    if entidade == "ano1" and acao == "falta":
+        return {"intent": "ano1_falta", "entidade": entidade, "tempo": tempo, "acao": acao}
+    if entidade == "ano1":
+        return {"intent": "ano1_comparativo", "entidade": entidade, "tempo": tempo, "acao": acao}
+    if acao == "previsao":
+        return {"intent": "previsao_fechamento", "entidade": entidade, "tempo": tempo, "acao": acao}
+    if entidade == "margem":
+        return {"intent": f"margem_{tempo if tempo in ['hoje', 'mes'] else 'mes'}", "entidade": entidade, "tempo": tempo, "acao": acao}
+    if entidade == "ticket":
+        return {"intent": f"ticket_{tempo if tempo in ['hoje', 'mes'] else 'mes'}", "entidade": entidade, "tempo": tempo, "acao": acao}
+
+    # Quantidade de clientes
+    if entidade == "cliente" and acao == "quantidade":
+        return {"intent": f"clientes_quantidade_{tempo if tempo in ['hoje', 'mes'] else 'mes'}", "entidade": entidade, "tempo": tempo, "acao": acao}
+
+    # Total de vendas sem entidade explícita
+    if entidade is None and acao == "total":
+        return {"intent": f"venda_{tempo}", "entidade": entidade, "tempo": tempo, "acao": acao}
+
+    # Rankings por entidade
+    if entidade in ["cliente", "marca", "linha", "produto", "vendedor"]:
+        sufixo = tempo if tempo in ["hoje", "mes", "periodo"] else "mes"
+        return {"intent": f"{entidade}_{sufixo}", "entidade": entidade, "tempo": sufixo, "acao": acao}
+
+    # Oportunidade e risco
+    if _tem(p, ["oportunidade", "oportunidades", "onde crescer", "potencial"]):
+        return {"intent": "oportunidade", "entidade": entidade, "tempo": tempo, "acao": acao}
+    if _tem(p, ["risco", "riscos", "alerta", "problema", "atencao"]):
+        return {"intent": "risco", "entidade": entidade, "tempo": tempo, "acao": acao}
+
+    return {"intent": "nao_mapeada", "entidade": entidade, "tempo": tempo, "acao": acao}
+
+
+# -------------------------------------------------
+# Funções de cálculo do agente
+# -------------------------------------------------
+def _agent_coluna_produto(df_ref: pd.DataFrame):
+    cols = list(df_ref.columns)
+    desc_col = find_col(cols, exact=["DESCRICAO", "DESCRICAO DO ITEM", "PRODUTO", "ITEM", "NOME DO PRODUTO", "DESCRIÇÃO"], must_contain=["DESCR"])
+    cod_col = find_col(cols, exact=["CODIGO", "COD", "COD. ITEM", "CODIGO ITEM", "CÓDIGO"], must_contain=["COD"])
+    qtd_col = find_col(cols, exact=["QTD", "QTDE", "QUANTIDADE", "QUANT."], must_contain=["QTD"])
+    if desc_col is None and "PRODUTO" in cols:
+        desc_col = "PRODUTO"
+    if desc_col is None and "ITEM" in cols:
+        desc_col = "ITEM"
+    return cod_col, desc_col, qtd_col
+
+
+def _agent_base(vendedor: str = "TODOS") -> pd.DataFrame:
+    base = df.copy()
+    if vendedor != "TODOS" and "VENDEDOR" in base.columns:
+        base = base[base["VENDEDOR"].fillna("").astype(str).map(norm_text) == norm_text(vendedor)].copy()
+    return base
+
+
+def _agent_datas_ref(base: pd.DataFrame):
+    if base.empty:
+        return None, None, None, ""
+    hoje_real = datetime.now().date()
+    datas = set(base["DIA"].dropna().tolist())
+    hoje_base = hoje_real if hoje_real in datas else base["DIA"].max()
+    ano_ref = int(pd.to_datetime(hoje_base).year)
+    mes_num_ref = int(pd.to_datetime(hoje_base).month)
+    mes_ref = month_key_from_monthnum(mes_num_ref)
+    return hoje_base, ano_ref, mes_num_ref, mes_ref
+
+
+def _agent_recortes(base: pd.DataFrame):
+    hoje_base, ano_ref, mes_num_ref, mes_ref = _agent_datas_ref(base)
+    if hoje_base is None:
+        return base.copy(), base.copy(), base.copy(), hoje_base, ano_ref, mes_num_ref, mes_ref
+    df_hoje = base[base["DIA"] == hoje_base].copy()
+    df_mes = base[(base["ANO"] == ano_ref) & (base["MES_NUM"] == mes_num_ref)].copy()
+    # período atual do filtro lateral, respeitando vendedor
+    df_periodo_agent = df_periodo.copy() if "df_periodo" in globals() else df_mes.copy()
+    return df_hoje, df_mes, df_periodo_agent, hoje_base, ano_ref, mes_num_ref, mes_ref
+
+
+def _agent_escolher_recorte(tempo: str, df_hoje: pd.DataFrame, df_mes: pd.DataFrame, df_periodo_agent: pd.DataFrame) -> pd.DataFrame:
+    if tempo == "hoje":
+        return df_hoje
+    if tempo == "periodo":
+        return df_periodo_agent
+    return df_mes
+
+
+def _agent_total(base_ref: pd.DataFrame) -> float:
+    return float(base_ref["VR_TOTAL"].sum()) if base_ref is not None and not base_ref.empty else 0.0
+
+
+def _agent_periodo_label(tempo: str, hoje_base, mes_ref: str, ano_ref: int) -> str:
+    if tempo == "hoje":
+        return pd.to_datetime(hoje_base).strftime("%d/%m/%Y")
+    if tempo == "periodo":
+        return "período filtrado"
+    return f"{mes_ref}/{ano_ref}"
+
+
+def _agent_top(base_ref: pd.DataFrame, coluna: str, titulo_coluna: str, n: int = 10) -> str:
+    if base_ref is None or base_ref.empty:
+        return "Não encontrei vendas para esse recorte."
+    if coluna not in base_ref.columns:
+        return f"Não encontrei a coluna {coluna} na base para responder essa intenção."
+    t = base_ref.copy()
+    t[coluna] = t[coluna].fillna("N/I").astype(str).map(norm_text)
+    t = t[t[coluna].astype(str).str.strip() != ""].copy()
+    if t.empty:
+        return f"Não encontrei dados válidos de {titulo_coluna.lower()} nesse recorte."
+    rank = (
+        t.groupby(coluna, as_index=False)["VR_TOTAL"].sum()
+        .sort_values("VR_TOTAL", ascending=False)
+        .head(n)
+    )
+    total_recorte = _agent_total(base_ref)
+    linhas = []
+    for i, row in rank.iterrows():
+        nome = row[coluna]
+        valor = float(row["VR_TOTAL"])
+        pct = (valor / total_recorte * 100) if total_recorte else None
+        linhas.append(f"{i+1}. {nome}: {format_brl(valor)} ({fmt_pct(pct)})")
+    return "\n".join(linhas)
+
+
+def _agent_top_produtos(base_ref: pd.DataFrame, n: int = 10) -> str:
+    if base_ref is None or base_ref.empty:
+        return "Não encontrei vendas para esse recorte."
+    cod_col, desc_col, qtd_col = _agent_coluna_produto(base_ref)
+    if desc_col is None:
+        return "Não encontrei uma coluna de descrição/produto na base para montar o ranking de produtos."
+    t = base_ref.copy()
+    t[desc_col] = t[desc_col].fillna("N/I").astype(str).map(norm_text)
+    agg = {"VR_TOTAL": "sum"}
+    if qtd_col is not None:
+        t[qtd_col] = pd.to_numeric(t[qtd_col], errors="coerce").fillna(0)
+        agg[qtd_col] = "sum"
+    rank = t.groupby(desc_col, as_index=False).agg(agg).sort_values("VR_TOTAL", ascending=False).head(n)
+    total_recorte = _agent_total(base_ref)
+    linhas = []
+    for i, row in rank.iterrows():
+        qtd_txt = ""
+        if qtd_col is not None:
+            qtd_txt = f" | Qtd: {float(row[qtd_col]):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        pct = (float(row["VR_TOTAL"]) / total_recorte * 100) if total_recorte else None
+        linhas.append(f"{i+1}. {row[desc_col]}: {format_brl(row['VR_TOTAL'])} ({fmt_pct(pct)}){qtd_txt}")
+    return "\n".join(linhas)
+
+
+def _agent_margem(base_ref: pd.DataFrame) -> str:
+    fat = _agent_total(base_ref)
+    custo = float(base_ref["CUSTO_NUM"].sum()) if base_ref is not None and not base_ref.empty and "CUSTO_NUM" in base_ref.columns else 0.0
+    margem = fat - custo
+    margem_pct = (margem / fat * 100) if fat else None
+    return f"Margem bruta: {format_brl(margem)} ({fmt_pct(margem_pct)}) | Faturamento: {format_brl(fat)} | Custo: {format_brl(custo)}"
+
+
+def _agent_previsao(df_mes_ref: pd.DataFrame, mes_ref: str) -> tuple[float, float, int, int]:
+    dias_uteis = int(DIAS_UTEIS_MENSAL.get(mes_ref, 0))
+    if df_mes_ref is None or df_mes_ref.empty:
+        return 0.0, 0.0, dias_uteis, 0
+    vendas_dia = df_mes_ref.groupby("DIA", as_index=False)["VR_TOTAL"].sum()
+    vendas_dia = vendas_dia[vendas_dia["VR_TOTAL"] > 0]
+    dias_com_venda = int(len(vendas_dia))
+    media = float(vendas_dia["VR_TOTAL"].mean()) if not vendas_dia.empty else 0.0
+    return media * dias_uteis, media, dias_uteis, dias_com_venda
+
+
+def _agent_meta_mes(df_mes_ref: pd.DataFrame, mes_ref: str) -> tuple[float, float, float, float]:
+    real = _agent_total(df_mes_ref)
+    meta = float(METAS_MENSAL.get(mes_ref, 0.0))
+    falta = max(meta - real, 0.0)
+    pct = (real / meta * 100) if meta else 0.0
+    return real, meta, falta, pct
+
+
+def _agent_ano1_mes(df_mes_ref: pd.DataFrame, mes_ref: str) -> tuple[float, float, float, float]:
+    real = _agent_total(df_mes_ref)
+    ano1 = float(ANO_1_MENSAL.get(mes_ref, 0.0))
+    falta = max(ano1 - real, 0.0)
+    cresc = ((real - ano1) / ano1 * 100) if ano1 else None
+    return real, ano1, falta, cresc
+
+
+def _agent_ticket_medio(base_ref: pd.DataFrame) -> str:
+    if base_ref is None or base_ref.empty:
+        return "Não encontrei vendas para calcular ticket médio."
+    fat = _agent_total(base_ref)
+    if "CLIENTE" in base_ref.columns:
+        clientes = base_ref["CLIENTE"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().nunique()
+        ticket = fat / clientes if clientes else 0.0
+        return f"Ticket médio por cliente: {format_brl(ticket)} | Faturamento: {format_brl(fat)} | Clientes: {clientes:,}".replace(",", ".")
+    qtd_docs = len(base_ref)
+    ticket = fat / qtd_docs if qtd_docs else 0.0
+    return f"Ticket médio por lançamento: {format_brl(ticket)} | Faturamento: {format_brl(fat)} | Lançamentos: {qtd_docs:,}".replace(",", ".")
+
+
+def _agent_quantidade_clientes(base_ref: pd.DataFrame) -> str:
+    if base_ref is None or base_ref.empty:
+        return "Não encontrei vendas para contar clientes."
+    if "CLIENTE" not in base_ref.columns:
+        return "Não encontrei a coluna CLIENTE na base."
+    clientes = base_ref["CLIENTE"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().nunique()
+    return f"Clientes únicos no recorte: {clientes:,}.".replace(",", ".")
+
+
+def _agent_resumo_executivo(base: pd.DataFrame) -> str:
+    df_hoje, df_mes_ref, df_periodo_agent, hoje_base, ano_ref, mes_num_ref, mes_ref = _agent_recortes(base)
+    real, meta, falta_meta, pct_meta = _agent_meta_mes(df_mes_ref, mes_ref)
+    prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
+    _, ano1, falta_ano1, cresc = _agent_ano1_mes(df_mes_ref, mes_ref)
+    top_cliente = _agent_top(df_mes_ref, "CLIENTE", "Cliente", 1) if "CLIENTE" in df_mes_ref.columns else "Cliente líder: coluna CLIENTE não encontrada"
+    top_marca = _agent_top(df_mes_ref, "MARCA", "Marca", 1) if "MARCA" in df_mes_ref.columns else "Marca líder: coluna MARCA não encontrada"
+    top_linha = _agent_top(df_mes_ref, "LINHA", "Linha", 1) if "LINHA" in df_mes_ref.columns else "Linha líder: coluna LINHA não encontrada"
+    status_meta = "tende a bater a meta" if prev >= meta and meta else "precisa acelerar para bater a meta"
+    status_ano1 = "tende a superar o Ano-1" if prev >= ano1 and ano1 else "ainda está abaixo da referência Ano-1"
+    return (
+        f"Resumo executivo do mês {mes_ref}/{ano_ref}:\n"
+        f"- Venda de hoje: {format_brl(_agent_total(df_hoje))}\n"
+        f"- Venda do mês: {format_brl(real)}\n"
+        f"- Previsão de fechamento: {format_brl(prev)} (média diária: {format_brl(media)} em {dias_com_venda} dias com venda x {dias_uteis} dias úteis)\n"
+        f"- Meta: {format_brl(meta)} | Atingido: {fmt_pct(pct_meta)} | Falta: {format_brl(falta_meta)}\n"
+        f"- Ano-1 ({ANO_1}): {format_brl(ano1)} | Crescimento atual: {fmt_pct(cresc)} | Falta para superar: {format_brl(falta_ano1)}\n"
+        f"- Cliente líder: {top_cliente.split(': ', 1)[-1] if ': ' in top_cliente else top_cliente}\n"
+        f"- Marca líder: {top_marca.split(': ', 1)[-1] if ': ' in top_marca else top_marca}\n"
+        f"- Linha líder: {top_linha.split(': ', 1)[-1] if ': ' in top_linha else top_linha}\n"
+        f"- Leitura gerencial: a operação {status_meta} e {status_ano1}."
+    )
+
+
+def _agent_oportunidade(df_mes_ref: pd.DataFrame, mes_ref: str, ano_ref: int) -> str:
+    linhas = [f"Oportunidades comerciais do mês {mes_ref}/{ano_ref}:"]
+    if "CLIENTE" in df_mes_ref.columns:
+        linhas.append("\nClientes com maior peso no mês:\n" + _agent_top(df_mes_ref, "CLIENTE", "Cliente", 5))
+    if "MARCA" in df_mes_ref.columns:
+        linhas.append("\nMarcas com maior tração:\n" + _agent_top(df_mes_ref, "MARCA", "Marca", 5))
+    if "LINHA" in df_mes_ref.columns:
+        linhas.append("\nLinhas com maior tração:\n" + _agent_top(df_mes_ref, "LINHA", "Linha", 5))
+    linhas.append("\nLeitura: use os líderes acima para montar ações de reforço, combos comerciais e direcionamento da equipe de vendas.")
+    return "\n".join(linhas)
+
+
+def _agent_risco(df_mes_ref: pd.DataFrame, mes_ref: str, ano_ref: int) -> str:
+    real, meta, falta_meta, pct_meta = _agent_meta_mes(df_mes_ref, mes_ref)
+    prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
+    _, ano1, falta_ano1, cresc = _agent_ano1_mes(df_mes_ref, mes_ref)
+    riscos = [f"Alertas gerenciais do mês {mes_ref}/{ano_ref}:"]
+    if meta and prev < meta:
+        riscos.append(f"- Risco de não bater meta: previsão {format_brl(prev)} x meta {format_brl(meta)}. Diferença projetada: {format_brl(prev - meta)}.")
+    if ano1 and prev < ano1:
+        riscos.append(f"- Risco de fechar abaixo do Ano-1: previsão {format_brl(prev)} x Ano-1 {format_brl(ano1)}. Diferença projetada: {format_brl(prev - ano1)}.")
+    if dias_com_venda <= 3:
+        riscos.append("- Poucos dias com venda no mês para uma previsão estatisticamente confortável; acompanhe a média diária com cautela.")
+    if len(riscos) == 1:
+        riscos.append("- Não identifiquei alerta crítico com base em meta, previsão e Ano-1. Continue acompanhando ritmo diário, marcas, linhas e clientes líderes.")
+    return "\n".join(riscos)
+
+
+def responder_agente_bi(pergunta: str) -> str:
+    p = _agent_normalizar_pergunta(pergunta)
+    base = _agent_base(vendedor_sel)
+    df_hoje, df_mes_ref, df_periodo_agent, hoje_base, ano_ref, mes_num_ref, mes_ref = _agent_recortes(base)
+    if hoje_base is None:
+        return "Não encontrei dados válidos na base."
+
+    cls = _classificar_intencao(p)
+    intent = cls["intent"]
+    entidade = cls["entidade"]
+    tempo = cls["tempo"]
+    recorte = _agent_escolher_recorte(tempo, df_hoje, df_mes_ref, df_periodo_agent)
+    label = _agent_periodo_label(tempo, hoje_base, mes_ref, ano_ref)
+    contexto = f"\n\nIntenção entendida: {intent} | Recorte: {label} | Vendedor: {vendedor_sel}."
+
+    # Vendas totais
+    if intent in ["venda_hoje", "venda_mes", "venda_periodo"]:
+        return f"Venda no recorte {label}: {format_brl(_agent_total(recorte))}.{contexto}"
+
+    # Rankings por entidade
+    if intent.startswith("cliente_") and not intent.startswith("clientes_quantidade"):
+        return f"Ranking de clientes — {label}:\n{_agent_top(recorte, 'CLIENTE', 'Cliente', 10)}{contexto}"
+    if intent.startswith("marca_"):
+        return f"Ranking de marcas — {label}:\n{_agent_top(recorte, 'MARCA', 'Marca', 10)}{contexto}"
+    if intent.startswith("linha_"):
+        return f"Ranking de linhas — {label}:\n{_agent_top(recorte, 'LINHA', 'Linha', 10)}{contexto}"
+    if intent.startswith("produto_"):
+        return f"Ranking de produtos — {label}:\n{_agent_top_produtos(recorte, 10)}{contexto}"
+    if intent.startswith("vendedor_"):
+        return f"Ranking de vendedores — {label}:\n{_agent_top(recorte, 'VENDEDOR', 'Vendedor', 10)}{contexto}"
+
+    # Quantidade de clientes
+    if intent.startswith("clientes_quantidade"):
+        return f"{_agent_quantidade_clientes(recorte)}{contexto}"
+
+    # Previsão
+    if intent == "previsao_fechamento":
+        prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
+        real, meta, falta_meta, pct_meta = _agent_meta_mes(df_mes_ref, mes_ref)
+        _, ano1, falta_ano1, cresc = _agent_ano1_mes(df_mes_ref, mes_ref)
+        return (
+            f"Previsão de fechamento de {mes_ref}/{ano_ref}: {format_brl(prev)}.\n"
+            f"Realizado: {format_brl(real)} | Média diária: {format_brl(media)} | Dias com venda: {dias_com_venda} | Dias úteis considerados: {dias_uteis}.\n"
+            f"Contra meta: {fmt_pct((prev / meta * 100) if meta else None)} da meta projetada.\n"
+            f"Contra Ano-1: {fmt_pct(((prev - ano1) / ano1 * 100) if ano1 else None)} projetado."
+            f"{contexto}"
+        )
+
+    # Meta
+    if intent == "meta_falta":
+        real, meta, falta, pct = _agent_meta_mes(df_mes_ref, mes_ref)
+        return f"Falta para bater a meta de {mes_ref}/{ano_ref}: {format_brl(falta)}.\nRealizado: {format_brl(real)} | Meta: {format_brl(meta)} | Atingido: {fmt_pct(pct)}.{contexto}"
+    if intent == "meta_percentual":
+        real, meta, falta, pct = _agent_meta_mes(df_mes_ref, mes_ref)
+        return f"Percentual da meta atingido em {mes_ref}/{ano_ref}: {fmt_pct(pct)}.\nRealizado: {format_brl(real)} | Meta: {format_brl(meta)} | Falta: {format_brl(falta)}.{contexto}"
+    if intent == "meta_projecao":
+        prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
+        real, meta, falta, pct = _agent_meta_mes(df_mes_ref, mes_ref)
+        status = "Sim, pela previsão atual tende a bater a meta." if prev >= meta and meta else "Não, pela previsão atual ainda não bate a meta."
+        return f"{status}\nPrevisão: {format_brl(prev)} | Meta: {format_brl(meta)} | Diferença projetada: {format_brl(prev - meta)}.{contexto}"
+    if intent == "meta_dia":
+        real, meta, falta, pct = _agent_meta_mes(df_mes_ref, mes_ref)
+        prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
+        dias_restantes_estimados = max(dias_uteis - dias_com_venda, 1)
+        necessidade_dia = falta / dias_restantes_estimados if falta else 0.0
+        return f"Para bater a meta de {mes_ref}/{ano_ref}, falta {format_brl(falta)}.\nNecessidade média estimada: {format_brl(necessidade_dia)} por dia útil restante estimado.\nRealizado: {format_brl(real)} | Meta: {format_brl(meta)}.{contexto}"
+
+    # Ano-1
+    if intent == "ano1_falta":
+        real, ano1, falta, cresc = _agent_ano1_mes(df_mes_ref, mes_ref)
+        return f"Falta para superar o Ano-1 em {mes_ref}: {format_brl(falta)}.\nRealizado: {format_brl(real)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Crescimento atual: {fmt_pct(cresc)}.{contexto}"
+    if intent == "ano1_comparativo":
+        real, ano1, falta, cresc = _agent_ano1_mes(df_mes_ref, mes_ref)
+        return f"Comparativo contra Ano-1 em {mes_ref}:\nRealizado: {format_brl(real)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Diferença: {format_brl(real - ano1)} | Crescimento: {fmt_pct(cresc)}.{contexto}"
+    if intent == "ano1_projecao":
+        prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
+        real, ano1, falta, cresc = _agent_ano1_mes(df_mes_ref, mes_ref)
+        status = "tende a superar o Ano-1" if prev >= ano1 and ano1 else "ainda tende a fechar abaixo do Ano-1"
+        return f"Pela previsão atual, {status}.\nPrevisão: {format_brl(prev)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Diferença projetada: {format_brl(prev - ano1)}.{contexto}"
+
+    # Margem e ticket
+    if intent.startswith("margem"):
+        return f"{_agent_margem(recorte)}{contexto}"
+    if intent.startswith("ticket"):
+        return f"{_agent_ticket_medio(recorte)}{contexto}"
+
+    # Executivo
+    if intent == "resumo_executivo":
+        return _agent_resumo_executivo(base) + contexto
+    if intent == "oportunidade":
+        return _agent_oportunidade(df_mes_ref, mes_ref, ano_ref) + contexto
+    if intent == "risco":
+        return _agent_risco(df_mes_ref, mes_ref, ano_ref) + contexto
+
+    return (
+        "Não consegui classificar essa pergunta com segurança. Tente combinar assunto + período + ação.\n\n"
+        "Assuntos aceitos: vendas, clientes, marcas, linhas, produtos, vendedores, meta, Ano-1, previsão, margem, ticket, resumo, riscos e oportunidades.\n"
+        "Períodos aceitos: hoje, mês ou período filtrado.\n"
+        "Exemplos: 'top marcas hoje', 'clientes do mês', 'quanto vendeu hoje', 'quanto falta para meta', 'previsão de fechamento', 'vendedores no período'."
+    )
+
+
+with st.container():
+    exemplos_bi = [
+        "Quanto vendeu hoje?",
+        "Top clientes hoje",
+        "Clientes do mês",
+        "Top marcas hoje",
+        "Marcas do mês",
+        "Linhas hoje",
+        "Linhas do mês",
+        "Produtos do mês",
+        "Top vendedores no período",
+        "Quanto falta para bater a meta?",
+        "Qual percentual da meta atingido?",
+        "Quanto preciso vender por dia para bater a meta?",
+        "Quanto falta para superar o ano passado?",
+        "Comparativo contra Ano-1",
+        "Previsão de fechamento",
+        "Margem do mês",
+        "Ticket médio hoje",
+        "Quantos clientes compraram no mês?",
+        "Faça uma análise gerencial",
+        "Quais os riscos do mês?",
+        "Quais as oportunidades?",
+    ]
+
+    with st.expander("Ver exemplos de perguntas por intenção"):
+        st.write(" | ".join(exemplos_bi))
+        st.caption("O agente não depende dessas frases exatas. Ele entende combinações de termos como: marca + hoje, cliente + mês, produto + ranking, meta + falta, Ano-1 + crescimento.")
+
+    pergunta_bi = st.chat_input("Pergunte ao Agente de BI da Única...")
+    if "historico_agente_bi" not in st.session_state:
+        st.session_state["historico_agente_bi"] = []
+
+    if pergunta_bi:
+        resposta_bi = responder_agente_bi(pergunta_bi)
+        st.session_state["historico_agente_bi"].append({"role": "user", "content": pergunta_bi})
+        st.session_state["historico_agente_bi"].append({"role": "assistant", "content": resposta_bi})
+
+    if not st.session_state["historico_agente_bi"]:
+        st.info("Digite uma pergunta no campo abaixo. Exemplo: Top marcas hoje")
+
+    for msg in st.session_state["historico_agente_bi"][-10:]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
 
 
