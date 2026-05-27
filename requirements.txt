@@ -4,3 +4,4 @@ openpyxl
 plotly
 reportlab
 google-generativeai
+google-genai

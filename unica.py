@@ -15,10 +15,24 @@ import os
 import glob
 import json
 
+# =========================
+# Gemini / Google AI
+# =========================
+# Compatível com o SDK novo (google-genai) e com o SDK antigo (google-generativeai).
+# No requirements.txt, recomenda-se adicionar:
+# google-genai
 try:
-    import google.generativeai as genai
+    from google import genai as genai_new
 except Exception:
-    genai = None
+    genai_new = None
+
+try:
+    import google.generativeai as genai_legacy
+except Exception:
+    genai_legacy = None
+
+# Mantém compatibilidade com validações antigas do código
+genai = genai_new if genai_new is not None else genai_legacy
 # =========================
 # Config
 # =========================
@@ -1728,10 +1742,29 @@ def _gemini_api_key():
     """Lê a chave do Gemini pelo Secrets do Streamlit ou por variável de ambiente."""
     try:
         if "GEMINI_API_KEY" in st.secrets:
-            return st.secrets["GEMINI_API_KEY"]
+            return str(st.secrets["GEMINI_API_KEY"]).strip()
     except Exception:
         pass
     return os.getenv("GEMINI_API_KEY", "").strip()
+
+
+def _gemini_model_name():
+    """
+    Modelo padrão do Gemini.
+    Pode ser alterado no Streamlit Secrets com:
+    GEMINI_MODEL = "gemini-2.5-flash"
+    """
+    try:
+        if "GEMINI_MODEL" in st.secrets:
+            return str(st.secrets["GEMINI_MODEL"]).strip()
+    except Exception:
+        pass
+    return os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+
+
+def _gemini_disponivel():
+    return bool(_gemini_api_key()) and (genai_new is not None or genai_legacy is not None)
+
 
 
 def _classificar_intencao_regras(p: str) -> dict:
@@ -1793,57 +1826,82 @@ def _extrair_json_gemini(texto: str) -> dict | None:
 
 
 def _classificar_intencao_gemini(pergunta_original: str, p_normalizada: str) -> dict | None:
-    """Usa Gemini para interpretar a pergunta e devolver uma intenção estruturada."""
+    """Usa Gemini para interpretar a pergunta e devolver uma intenção estruturada em JSON."""
     api_key = _gemini_api_key()
-    if genai is None or not api_key:
+    if not _gemini_disponivel():
         return None
 
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        prompt = f"""
+    model_name = _gemini_model_name()
+
+    prompt = f"""
 Você é um classificador de perguntas para um dashboard comercial em Python/Pandas.
 Sua tarefa é transformar a pergunta do usuário em uma intenção de BI.
 
 Regras obrigatórias:
-- Responda SOMENTE em JSON válido.
-- Não calcule valores. O Python fará os cálculos.
-- Escolha exatamente uma intenção da lista permitida.
-- Se o usuário pedir ranking/top/maiores por cliente, marca, linha, produto ou vendedor, use a intenção da entidade com o período correto.
-- Períodos aceitos: hoje, mes, periodo.
-- Se não ficar claro o período, use mes.
-- Se a pergunta mencionar "hoje", use hoje.
-- Se a pergunta mencionar "período", "filtro" ou "selecionado", use periodo.
-- Se perguntar "quanto vendeu", "faturamento", "receita" sem entidade, use venda_*.
-- Se perguntar meta, use meta_falta, meta_percentual, meta_projecao ou meta_dia.
-- Se perguntar ano passado, ano-1, ano anterior ou comparação anual, use ano1_*.
-- Se pedir análise geral, diagnóstico ou visão executiva, use resumo_executivo.
+1. Responda somente em JSON válido.
+2. Não calcule valores.
+3. Não invente dados.
+4. Sua função é apenas classificar a pergunta para que o Python faça os cálculos.
+5. Se a pergunta pedir análise, diagnóstico, resumo, risco ou oportunidade, use uma intenção executiva.
+6. Se não houver segurança, use "nao_mapeada".
 
 Intenções permitidas:
 {json.dumps(INTENTS_PERMITIDAS_GEMINI, ensure_ascii=False)}
 
-Formato da resposta:
-{{
-  "intent": "uma_intencao_permitida",
-  "entidade": "cliente|marca|linha|produto|vendedor|meta|ano1|margem|ticket|null",
-  "tempo": "hoje|mes|periodo",
-  "acao": "top|total|falta|percentual|previsao|comparativo|analise|quantidade",
-  "confianca": 0.0
-}}
+Campos permitidos:
+- intent: uma das intenções permitidas
+- entidade: cliente, marca, linha, produto, vendedor, meta, ano1, margem, ticket ou null
+- tempo: hoje, mes ou periodo
+- acao: top, total, falta, percentual, previsao, comparativo, analise, quantidade, ticket, margem ou null
+- confianca: número de 0 a 1
 
-Pergunta original: {pergunta_original}
-Pergunta normalizada: {p_normalizada}
-"""
-        resp = model.generate_content(
-            prompt,
-            generation_config={
-                "temperature": 0.05,
-                "top_p": 0.2,
-                "max_output_tokens": 220,
-                "response_mime_type": "application/json",
-            },
-        )
-        dados = _extrair_json_gemini(getattr(resp, "text", ""))
+Exemplos:
+Pergunta: "quanto vendeu hoje?"
+Resposta: {{"intent":"venda_hoje","entidade":null,"tempo":"hoje","acao":"total","confianca":0.95}}
+
+Pergunta: "top clientes do mês"
+Resposta: {{"intent":"cliente_mes","entidade":"cliente","tempo":"mes","acao":"top","confianca":0.95}}
+
+Pergunta: "quais marcas venderam mais no período?"
+Resposta: {{"intent":"marca_periodo","entidade":"marca","tempo":"periodo","acao":"top","confianca":0.95}}
+
+Pergunta: "quanto falta para bater a meta?"
+Resposta: {{"intent":"meta_falta","entidade":"meta","tempo":"mes","acao":"falta","confianca":0.95}}
+
+Pergunta original:
+{pergunta_original}
+
+Pergunta normalizada:
+{p_normalizada}
+""".strip()
+
+    try:
+        # SDK novo: package google-genai
+        if genai_new is not None:
+            client = genai_new.Client(api_key=api_key)
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={
+                    "temperature": 0,
+                    "response_mime_type": "application/json",
+                },
+            )
+            txt = getattr(resp, "text", "") or ""
+        else:
+            # SDK antigo: package google-generativeai
+            genai_legacy.configure(api_key=api_key)
+            model = genai_legacy.GenerativeModel(model_name)
+            resp = model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0,
+                    "response_mime_type": "application/json",
+                },
+            )
+            txt = getattr(resp, "text", "") or ""
+
+        dados = _extrair_json_gemini(txt)
         if not isinstance(dados, dict):
             return None
 
@@ -1856,19 +1914,32 @@ Pergunta normalizada: {p_normalizada}
             tempo = "mes"
 
         entidade = dados.get("entidade", None)
-        if entidade in ["null", "None", "", "nenhuma"]:
-            entidade = None
+        if entidade is not None:
+            entidade = str(entidade).strip().lower()
+            if entidade in ["", "none", "null", "nenhuma"]:
+                entidade = None
+
+        acao = dados.get("acao", "analise")
+        if acao is not None:
+            acao = str(acao).strip().lower()
+            if acao in ["", "none", "null"]:
+                acao = "analise"
 
         return {
             "intent": intent,
             "entidade": entidade,
             "tempo": tempo,
-            "acao": str(dados.get("acao", "analise")).strip().lower(),
+            "acao": acao,
             "origem": "Gemini",
+            "modelo": model_name,
             "confianca": dados.get("confianca", None),
         }
-    except Exception:
+
+    except Exception as e:
+        # Em produção, não quebra o dashboard se a API falhar.
+        st.session_state["ultimo_erro_gemini"] = str(e)
         return None
+
 
 
 def _classificar_intencao(pergunta_original: str) -> dict:
@@ -2205,12 +2276,15 @@ def responder_agente_bi(pergunta: str) -> str:
 
 
 with st.container():
-    if genai is None:
-        st.warning("Biblioteca do Gemini não encontrada. Adicione `google-generativeai` no requirements.txt.")
+    if genai_new is None and genai_legacy is None:
+        st.warning("Biblioteca do Gemini não encontrada. Adicione `google-genai` no requirements.txt.")
     elif not _gemini_api_key():
         st.warning("Chave do Gemini não configurada. No Streamlit Cloud, adicione `GEMINI_API_KEY` em Secrets. Enquanto isso, o app usará o fallback por regras.")
     else:
-        st.success("Gemini configurado. O ChatBI já pode interpretar perguntas com IA.")
+        st.success(f"Gemini configurado. Modelo ativo: `{_gemini_model_name()}`. O ChatBI já pode interpretar perguntas com IA.")
+        if "ultimo_erro_gemini" in st.session_state:
+            with st.expander("Último erro do Gemini"):
+                st.code(st.session_state["ultimo_erro_gemini"])
 
     exemplos_bi = [
         "Quanto vendeu hoje?",
