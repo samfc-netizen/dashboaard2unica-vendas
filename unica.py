@@ -13,6 +13,12 @@ import plotly.graph_objects as go
 import plotly.colors as pc
 import os
 import glob
+import json
+
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
 # =========================
 # Config
 # =========================
@@ -1437,10 +1443,9 @@ else:
 # AGENTE DE BI — INTENÇÕES GERENCIAIS
 # =========================
 st.divider()
-st.markdown("## Agente de BI — Intenções Gerenciais")
+st.markdown("## ChatBI Única — Perguntas com Gemini")
 st.caption(
-    "Pergunte em linguagem natural. O agente identifica intenção por assunto + período + ação, "
-    "sem depender de perguntas exatas. Ex.: 'top clientes hoje', 'marcas do mês', 'quanto falta meta', 'linhas hoje'."
+    "Pergunte em linguagem natural. O Gemini interpreta a pergunta, e o Python/Pandas executa os cálculos com base nos dados reais do dashboard."
 )
 
 
@@ -1701,55 +1706,177 @@ def _detectar_acao(p: str) -> str:
     return acao
 
 
-def _classificar_intencao(p: str) -> dict:
+INTENTS_PERMITIDAS_GEMINI = [
+    "venda_hoje", "venda_mes", "venda_periodo",
+    "previsao_fechamento",
+    "meta_falta", "meta_percentual", "meta_projecao", "meta_dia",
+    "ano1_falta", "ano1_comparativo", "ano1_projecao",
+    "cliente_hoje", "cliente_mes", "cliente_periodo",
+    "clientes_quantidade_hoje", "clientes_quantidade_mes",
+    "marca_hoje", "marca_mes", "marca_periodo",
+    "linha_hoje", "linha_mes", "linha_periodo",
+    "produto_hoje", "produto_mes", "produto_periodo",
+    "vendedor_hoje", "vendedor_mes", "vendedor_periodo",
+    "margem_hoje", "margem_mes",
+    "ticket_hoje", "ticket_mes",
+    "resumo_executivo", "oportunidade", "risco",
+    "nao_mapeada",
+]
+
+
+def _gemini_api_key():
+    """Lê a chave do Gemini pelo Secrets do Streamlit ou por variável de ambiente."""
+    try:
+        if "GEMINI_API_KEY" in st.secrets:
+            return st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        pass
+    return os.getenv("GEMINI_API_KEY", "").strip()
+
+
+def _classificar_intencao_regras(p: str) -> dict:
+    """Fallback local: mantém o app funcionando mesmo sem Gemini/API."""
     entidade = _detectar_entidade(p)
     tempo = _detectar_tempo(p)
     acao = _detectar_acao(p)
 
-    # Regras gerenciais prioritárias
     if acao == "analise" or _tem(p, ["resumo executivo", "analise gerencial", "como esta o negocio", "diagnostico"]):
-        return {"intent": "resumo_executivo", "entidade": entidade, "tempo": tempo, "acao": "analise"}
+        return {"intent": "resumo_executivo", "entidade": entidade, "tempo": tempo, "acao": "analise", "origem": "regras"}
     if entidade == "meta" and acao == "falta":
         if _tem(p, ["por dia", "diaria", "diario", "vender por dia"]):
-            return {"intent": "meta_dia", "entidade": entidade, "tempo": tempo, "acao": acao}
-        return {"intent": "meta_falta", "entidade": entidade, "tempo": tempo, "acao": acao}
+            return {"intent": "meta_dia", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
+        return {"intent": "meta_falta", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if entidade == "meta" and acao == "previsao":
-        return {"intent": "meta_projecao", "entidade": entidade, "tempo": tempo, "acao": acao}
+        return {"intent": "meta_projecao", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if entidade == "meta":
-        return {"intent": "meta_percentual", "entidade": entidade, "tempo": tempo, "acao": acao}
+        return {"intent": "meta_percentual", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if entidade == "ano1" and acao == "previsao":
-        return {"intent": "ano1_projecao", "entidade": entidade, "tempo": tempo, "acao": acao}
+        return {"intent": "ano1_projecao", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if entidade == "ano1" and acao == "falta":
-        return {"intent": "ano1_falta", "entidade": entidade, "tempo": tempo, "acao": acao}
+        return {"intent": "ano1_falta", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if entidade == "ano1":
-        return {"intent": "ano1_comparativo", "entidade": entidade, "tempo": tempo, "acao": acao}
+        return {"intent": "ano1_comparativo", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if acao == "previsao":
-        return {"intent": "previsao_fechamento", "entidade": entidade, "tempo": tempo, "acao": acao}
+        return {"intent": "previsao_fechamento", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if entidade == "margem":
-        return {"intent": f"margem_{tempo if tempo in ['hoje', 'mes'] else 'mes'}", "entidade": entidade, "tempo": tempo, "acao": acao}
+        return {"intent": f"margem_{tempo if tempo in ['hoje', 'mes'] else 'mes'}", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if entidade == "ticket":
-        return {"intent": f"ticket_{tempo if tempo in ['hoje', 'mes'] else 'mes'}", "entidade": entidade, "tempo": tempo, "acao": acao}
-
-    # Quantidade de clientes
+        return {"intent": f"ticket_{tempo if tempo in ['hoje', 'mes'] else 'mes'}", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if entidade == "cliente" and acao == "quantidade":
-        return {"intent": f"clientes_quantidade_{tempo if tempo in ['hoje', 'mes'] else 'mes'}", "entidade": entidade, "tempo": tempo, "acao": acao}
-
-    # Total de vendas sem entidade explícita
+        return {"intent": f"clientes_quantidade_{tempo if tempo in ['hoje', 'mes'] else 'mes'}", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if entidade is None and acao == "total":
-        return {"intent": f"venda_{tempo}", "entidade": entidade, "tempo": tempo, "acao": acao}
-
-    # Rankings por entidade
+        return {"intent": f"venda_{tempo}", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if entidade in ["cliente", "marca", "linha", "produto", "vendedor"]:
         sufixo = tempo if tempo in ["hoje", "mes", "periodo"] else "mes"
-        return {"intent": f"{entidade}_{sufixo}", "entidade": entidade, "tempo": sufixo, "acao": acao}
-
-    # Oportunidade e risco
+        return {"intent": f"{entidade}_{sufixo}", "entidade": entidade, "tempo": sufixo, "acao": acao, "origem": "regras"}
     if _tem(p, ["oportunidade", "oportunidades", "onde crescer", "potencial"]):
-        return {"intent": "oportunidade", "entidade": entidade, "tempo": tempo, "acao": acao}
+        return {"intent": "oportunidade", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
     if _tem(p, ["risco", "riscos", "alerta", "problema", "atencao"]):
-        return {"intent": "risco", "entidade": entidade, "tempo": tempo, "acao": acao}
+        return {"intent": "risco", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
+    return {"intent": "nao_mapeada", "entidade": entidade, "tempo": tempo, "acao": acao, "origem": "regras"}
 
-    return {"intent": "nao_mapeada", "entidade": entidade, "tempo": tempo, "acao": acao}
+
+def _extrair_json_gemini(texto: str) -> dict | None:
+    if not texto:
+        return None
+    try:
+        return json.loads(texto)
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", texto, flags=re.S)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return None
+
+
+def _classificar_intencao_gemini(pergunta_original: str, p_normalizada: str) -> dict | None:
+    """Usa Gemini para interpretar a pergunta e devolver uma intenção estruturada."""
+    api_key = _gemini_api_key()
+    if genai is None or not api_key:
+        return None
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = f"""
+Você é um classificador de perguntas para um dashboard comercial em Python/Pandas.
+Sua tarefa é transformar a pergunta do usuário em uma intenção de BI.
+
+Regras obrigatórias:
+- Responda SOMENTE em JSON válido.
+- Não calcule valores. O Python fará os cálculos.
+- Escolha exatamente uma intenção da lista permitida.
+- Se o usuário pedir ranking/top/maiores por cliente, marca, linha, produto ou vendedor, use a intenção da entidade com o período correto.
+- Períodos aceitos: hoje, mes, periodo.
+- Se não ficar claro o período, use mes.
+- Se a pergunta mencionar "hoje", use hoje.
+- Se a pergunta mencionar "período", "filtro" ou "selecionado", use periodo.
+- Se perguntar "quanto vendeu", "faturamento", "receita" sem entidade, use venda_*.
+- Se perguntar meta, use meta_falta, meta_percentual, meta_projecao ou meta_dia.
+- Se perguntar ano passado, ano-1, ano anterior ou comparação anual, use ano1_*.
+- Se pedir análise geral, diagnóstico ou visão executiva, use resumo_executivo.
+
+Intenções permitidas:
+{json.dumps(INTENTS_PERMITIDAS_GEMINI, ensure_ascii=False)}
+
+Formato da resposta:
+{{
+  "intent": "uma_intencao_permitida",
+  "entidade": "cliente|marca|linha|produto|vendedor|meta|ano1|margem|ticket|null",
+  "tempo": "hoje|mes|periodo",
+  "acao": "top|total|falta|percentual|previsao|comparativo|analise|quantidade",
+  "confianca": 0.0
+}}
+
+Pergunta original: {pergunta_original}
+Pergunta normalizada: {p_normalizada}
+"""
+        resp = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0.05,
+                "top_p": 0.2,
+                "max_output_tokens": 220,
+                "response_mime_type": "application/json",
+            },
+        )
+        dados = _extrair_json_gemini(getattr(resp, "text", ""))
+        if not isinstance(dados, dict):
+            return None
+
+        intent = str(dados.get("intent", "nao_mapeada")).strip()
+        if intent not in INTENTS_PERMITIDAS_GEMINI:
+            return None
+
+        tempo = str(dados.get("tempo", "mes")).strip().lower()
+        if tempo not in ["hoje", "mes", "periodo"]:
+            tempo = "mes"
+
+        entidade = dados.get("entidade", None)
+        if entidade in ["null", "None", "", "nenhuma"]:
+            entidade = None
+
+        return {
+            "intent": intent,
+            "entidade": entidade,
+            "tempo": tempo,
+            "acao": str(dados.get("acao", "analise")).strip().lower(),
+            "origem": "Gemini",
+            "confianca": dados.get("confianca", None),
+        }
+    except Exception:
+        return None
+
+
+def _classificar_intencao(pergunta_original: str) -> dict:
+    p = _agent_normalizar_pergunta(pergunta_original)
+    cls_gemini = _classificar_intencao_gemini(pergunta_original, p)
+    if cls_gemini:
+        return cls_gemini
+    return _classificar_intencao_regras(p)
 
 
 # -------------------------------------------------
@@ -1976,19 +2103,19 @@ def _agent_risco(df_mes_ref: pd.DataFrame, mes_ref: str, ano_ref: int) -> str:
 
 
 def responder_agente_bi(pergunta: str) -> str:
-    p = _agent_normalizar_pergunta(pergunta)
     base = _agent_base(vendedor_sel)
     df_hoje, df_mes_ref, df_periodo_agent, hoje_base, ano_ref, mes_num_ref, mes_ref = _agent_recortes(base)
     if hoje_base is None:
         return "Não encontrei dados válidos na base."
 
-    cls = _classificar_intencao(p)
+    cls = _classificar_intencao(pergunta)
     intent = cls["intent"]
     entidade = cls["entidade"]
     tempo = cls["tempo"]
     recorte = _agent_escolher_recorte(tempo, df_hoje, df_mes_ref, df_periodo_agent)
     label = _agent_periodo_label(tempo, hoje_base, mes_ref, ano_ref)
-    contexto = f"\n\nIntenção entendida: {intent} | Recorte: {label} | Vendedor: {vendedor_sel}."
+    origem_cls = cls.get("origem", "Gemini/regras")
+    contexto = f"\n\nInterpretação: {intent} | Recorte: {label} | Vendedor: {vendedor_sel} | Motor: {origem_cls}."
 
     # Vendas totais
     if intent in ["venda_hoje", "venda_mes", "venda_periodo"]:
@@ -2078,6 +2205,13 @@ def responder_agente_bi(pergunta: str) -> str:
 
 
 with st.container():
+    if genai is None:
+        st.warning("Biblioteca do Gemini não encontrada. Adicione `google-generativeai` no requirements.txt.")
+    elif not _gemini_api_key():
+        st.warning("Chave do Gemini não configurada. No Streamlit Cloud, adicione `GEMINI_API_KEY` em Secrets. Enquanto isso, o app usará o fallback por regras.")
+    else:
+        st.success("Gemini configurado. O ChatBI já pode interpretar perguntas com IA.")
+
     exemplos_bi = [
         "Quanto vendeu hoje?",
         "Top clientes hoje",
@@ -2104,9 +2238,9 @@ with st.container():
 
     with st.expander("Ver exemplos de perguntas por intenção"):
         st.write(" | ".join(exemplos_bi))
-        st.caption("O agente não depende dessas frases exatas. Ele entende combinações de termos como: marca + hoje, cliente + mês, produto + ranking, meta + falta, Ano-1 + crescimento.")
+        st.caption("O Gemini interpreta a pergunta e envia uma intenção estruturada para o Python calcular com Pandas. Se a chave/API não estiver configurada, o app usa um fallback por regras.")
 
-    pergunta_bi = st.chat_input("Pergunte ao Agente de BI da Única...")
+    pergunta_bi = st.chat_input("Pergunte ao ChatBI da Única com Gemini...")
     if "historico_agente_bi" not in st.session_state:
         st.session_state["historico_agente_bi"] = []
 
@@ -2116,7 +2250,7 @@ with st.container():
         st.session_state["historico_agente_bi"].append({"role": "assistant", "content": resposta_bi})
 
     if not st.session_state["historico_agente_bi"]:
-        st.info("Digite uma pergunta no campo abaixo. Exemplo: Top marcas hoje")
+        st.info("Digite uma pergunta no campo abaixo. Exemplo: Qual foi o top cliente do mês?")
 
     for msg in st.session_state["historico_agente_bi"][-10:]:
         with st.chat_message(msg["role"]):
