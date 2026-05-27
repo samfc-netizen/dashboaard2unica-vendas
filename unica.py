@@ -1767,6 +1767,99 @@ def _gemini_disponivel():
 
 
 
+
+MESES_NOME_NUM = {
+    "janeiro": 1, "jan": 1,
+    "fevereiro": 2, "fev": 2,
+    "marco": 3, "mar": 3, "março": 3,
+    "abril": 4, "abr": 4,
+    "maio": 5, "mai": 5,
+    "junho": 6, "jun": 6,
+    "julho": 7, "jul": 7,
+    "agosto": 8, "ago": 8,
+    "setembro": 9, "set": 9,
+    "outubro": 10, "out": 10,
+    "novembro": 11, "nov": 11,
+    "dezembro": 12, "dez": 12,
+}
+
+
+def _norm_match(v) -> str:
+    s = "" if v is None else str(v)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = s.upper().strip()
+    s = re.sub(r"[^A-Z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _extrair_ano_mes(pergunta_original: str, p_normalizada: str) -> dict:
+    filtros = {}
+    anos = re.findall(r"(20\d{2})", pergunta_original or "") + re.findall(r"(20\d{2})", p_normalizada or "")
+    if anos:
+        filtros["ano"] = int(anos[-1])
+    for nome, num in MESES_NOME_NUM.items():
+        if re.search(rf"{re.escape(nome)}", p_normalizada):
+            filtros["mes"] = num
+            break
+    return filtros
+
+
+def _valores_coluna_para_prompt(coluna: str, limite: int = 80) -> list[str]:
+    try:
+        if coluna not in df.columns:
+            return []
+        vals = df[coluna].dropna().astype(str).map(norm_text)
+        vals = vals[vals.str.strip() != ""].drop_duplicates().tolist()
+        return sorted(vals, key=lambda x: x.upper())[:limite]
+    except Exception:
+        return []
+
+
+def _detectar_valor_dimensional(pergunta_original: str, p_normalizada: str, coluna: str) -> str | None:
+    if coluna not in df.columns:
+        return None
+    texto_norm = _norm_match((pergunta_original or "") + " " + (p_normalizada or ""))
+    vals = df[coluna].dropna().astype(str).map(norm_text).drop_duplicates().tolist()
+    candidatos = []
+    for val in vals:
+        val_limpo = norm_text(val)
+        if not val_limpo:
+            continue
+        vnorm = _norm_match(val_limpo)
+        if not vnorm:
+            continue
+        if re.search(rf"(^|\s){re.escape(vnorm)}($|\s)", texto_norm):
+            candidatos.append((len(vnorm), val_limpo))
+        elif len(vnorm) >= 4 and vnorm in texto_norm:
+            candidatos.append((len(vnorm), val_limpo))
+    if not candidatos:
+        return None
+    candidatos.sort(reverse=True)
+    return candidatos[0][1]
+
+
+def _extrair_filtros_pergunta(pergunta_original: str, p_normalizada: str) -> dict:
+    filtros = _extrair_ano_mes(pergunta_original, p_normalizada)
+    for chave, coluna in {"marca":"MARCA", "linha":"LINHA", "segmento":"SEGMENTO", "cliente":"CLIENTE", "vendedor":"VENDEDOR"}.items():
+        val = _detectar_valor_dimensional(pergunta_original, p_normalizada, coluna)
+        if val:
+            filtros[chave] = val
+    try:
+        cod_col, desc_col, _ = _agent_coluna_produto(df)
+    except Exception:
+        cod_col, desc_col = None, None
+    produto_val = _detectar_valor_dimensional(pergunta_original, p_normalizada, desc_col) if desc_col else None
+    if produto_val:
+        filtros["produto"] = produto_val
+    return filtros
+
+
+def _mes_int_para_nome(mes: int | str | None) -> str:
+    try:
+        return month_key_from_monthnum(int(mes))
+    except Exception:
+        return ""
+
 def _classificar_intencao_regras(p: str) -> dict:
     """Fallback local: mantém o app funcionando mesmo sem Gemini/API."""
     entidade = _detectar_entidade(p)
@@ -1848,11 +1941,18 @@ Regras obrigatórias:
 Intenções permitidas:
 {json.dumps(INTENTS_PERMITIDAS_GEMINI, ensure_ascii=False)}
 
+Valores conhecidos para ajudar a preencher filtros:
+- marcas: {json.dumps(_valores_coluna_para_prompt("MARCA", 120), ensure_ascii=False)}
+- linhas: {json.dumps(_valores_coluna_para_prompt("LINHA", 120), ensure_ascii=False)}
+- segmentos: {json.dumps(_valores_coluna_para_prompt("SEGMENTO", 80), ensure_ascii=False)}
+
 Campos permitidos:
 - intent: uma das intenções permitidas
 - entidade: cliente, marca, linha, produto, vendedor, meta, ano1, margem, ticket ou null
 - tempo: hoje, mes ou periodo
 - acao: top, total, falta, percentual, previsao, comparativo, analise, quantidade, ticket, margem ou null
+- filtros: objeto JSON com os filtros encontrados na pergunta. Use as chaves marca, linha, segmento, produto, cliente, vendedor, ano, mes. Se não houver filtro, use {{}}.
+- comparar_ano1: true ou false quando a pergunta pedir comparação contra Ano-1, ano passado ou 2025
 - confianca: número de 0 a 1
 
 Exemplos:
@@ -1860,7 +1960,13 @@ Pergunta: "quanto vendeu hoje?"
 Resposta: {{"intent":"venda_hoje","entidade":null,"tempo":"hoje","acao":"total","confianca":0.95}}
 
 Pergunta: "top clientes do mês"
-Resposta: {{"intent":"cliente_mes","entidade":"cliente","tempo":"mes","acao":"top","confianca":0.95}}
+Resposta: {{"intent":"cliente_mes","entidade":"cliente","tempo":"mes","acao":"top","filtros":{{}},"comparar_ano1":false,"confianca":0.95}}
+
+Pergunta: "qual cliente mais comprou produtos da marca 3M em 2026?"
+Resposta: {{"intent":"cliente_periodo","entidade":"cliente","tempo":"periodo","acao":"top","filtros":{{"marca":"3M","ano":2026}},"comparar_ano1":false,"confianca":0.98}}
+
+Pergunta: "quais produtos da linha abrasivos venderam mais em maio de 2026?"
+Resposta: {{"intent":"produto_mes","entidade":"produto","tempo":"mes","acao":"top","filtros":{{"linha":"abrasivos","ano":2026,"mes":5}},"comparar_ano1":false,"confianca":0.98}}
 
 Pergunta: "quais marcas venderam mais no período?"
 Resposta: {{"intent":"marca_periodo","entidade":"marca","tempo":"periodo","acao":"top","confianca":0.95}}
@@ -1925,11 +2031,17 @@ Pergunta normalizada:
             if acao in ["", "none", "null"]:
                 acao = "analise"
 
+        filtros = dados.get("filtros", {})
+        if not isinstance(filtros, dict):
+            filtros = {}
+
         return {
             "intent": intent,
             "entidade": entidade,
             "tempo": tempo,
             "acao": acao,
+            "filtros": filtros,
+            "comparar_ano1": bool(dados.get("comparar_ano1", False)),
             "origem": "Gemini",
             "modelo": model_name,
             "confianca": dados.get("confianca", None),
@@ -1944,99 +2056,27 @@ Pergunta normalizada:
 
 def _classificar_intencao(pergunta_original: str) -> dict:
     p = _agent_normalizar_pergunta(pergunta_original)
+    filtros_local = _extrair_filtros_pergunta(pergunta_original, p)
     cls_gemini = _classificar_intencao_gemini(pergunta_original, p)
     if cls_gemini:
+        filtros_gemini = cls_gemini.get("filtros", {})
+        if not isinstance(filtros_gemini, dict):
+            filtros_gemini = {}
+        filtros = {**filtros_local, **{k: v for k, v in filtros_gemini.items() if v not in [None, "", [], {}]}}
+        cls_gemini["filtros"] = filtros
+        if filtros.get("ano") and not filtros.get("mes") and cls_gemini.get("tempo") == "mes":
+            cls_gemini["tempo"] = "periodo"
+            if str(cls_gemini.get("intent", "")).endswith("_mes"):
+                cls_gemini["intent"] = str(cls_gemini["intent"]).replace("_mes", "_periodo")
         return cls_gemini
-    return _classificar_intencao_regras(p)
-
-
-
-def _gerar_resposta_gemini_livre(pergunta_original: str, contexto_bi: str = "") -> str | None:
-    """
-    Resposta livre com Gemini para perguntas gerais ou perguntas que não caíram
-    nas intenções estruturadas do BI.
-
-    Importante:
-    - Para perguntas de BI mapeadas, o Python/Pandas continua calculando.
-    - Para perguntas gerais, o Gemini responde naturalmente.
-    - Para perguntas de BI não mapeadas, o Gemini recebe apenas um resumo seguro
-      do contexto, sem a base inteira, para evitar lentidão e consumo excessivo.
-    """
-    api_key = _gemini_api_key()
-    if not _gemini_disponivel():
-        return None
-
-    model_name = _gemini_model_name()
-    prompt = f"""
-Você é o ChatBI da Única Atacadista, um assistente de BI comercial integrado a um dashboard em Python/Streamlit.
-
-Regras de resposta:
-1. Responda em português do Brasil, de forma objetiva e natural.
-2. Se a pergunta for uma saudação ou pergunta geral, responda normalmente.
-3. Se a pergunta for sobre indicadores, use somente o contexto resumido abaixo.
-4. Não invente números que não estejam no contexto.
-5. Se precisar de um cálculo que não esteja disponível no contexto, diga que a análise precisa ser feita por uma rota de cálculo do Python.
-6. Não diga que é Gemini; apresente-se como assistente de BI da Única.
-
-Contexto resumido do dashboard:
-{contexto_bi}
-
-Pergunta do usuário:
-{pergunta_original}
-""".strip()
-
-    try:
-        if genai_new is not None:
-            client = genai_new.Client(api_key=api_key)
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config={"temperature": 0.2},
-            )
-            return (getattr(resp, "text", "") or "").strip() or None
-        else:
-            genai_legacy.configure(api_key=api_key)
-            model = genai_legacy.GenerativeModel(model_name)
-            resp = model.generate_content(
-                prompt,
-                generation_config={"temperature": 0.2},
-            )
-            return (getattr(resp, "text", "") or "").strip() or None
-    except Exception as e:
-        st.session_state["ultimo_erro_gemini"] = str(e)
-        return None
-
-
-def _contexto_resumido_chatbi(base: pd.DataFrame, df_hoje: pd.DataFrame, df_mes_ref: pd.DataFrame, df_periodo_agent: pd.DataFrame, hoje_base, ano_ref, mes_ref) -> str:
-    """Monta um contexto pequeno para o Gemini responder perguntas gerais sem receber a base inteira."""
-    try:
-        fat_hoje = _agent_total(df_hoje)
-        fat_mes = _agent_total(df_mes_ref)
-        fat_periodo = _agent_total(df_periodo_agent)
-        clientes_mes = df_mes_ref["CLIENTE"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().nunique() if "CLIENTE" in df_mes_ref.columns else 0
-        clientes_periodo = df_periodo_agent["CLIENTE"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().nunique() if "CLIENTE" in df_periodo_agent.columns else 0
-        real_meta, meta, falta, pct = _agent_meta_mes(df_mes_ref, mes_ref)
-        prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
-        margem_txt = _agent_margem(df_mes_ref)
-        ticket_txt = _agent_ticket_medio(df_mes_ref)
-        cols_relevantes = [c for c in ["DATA", "CLIENTE", "MARCA", "LINHA", "VENDEDOR", "CIDADE", "BAIRRO", "VR.TOTAL", "CUSTO"] if c in base.columns]
-        return (
-            f"Período filtrado no dashboard: {dt_ini} até {dt_fim}.\n"
-            f"Última data disponível na base: {hoje_base}.\n"
-            f"Mês de referência: {mes_ref}/{ano_ref}.\n"
-            f"Vendedor filtrado: {vendedor_sel}.\n"
-            f"Faturamento hoje/último dia da base: {format_brl(fat_hoje)}.\n"
-            f"Faturamento do mês de referência: {format_brl(fat_mes)}.\n"
-            f"Faturamento do período filtrado: {format_brl(fat_periodo)}.\n"
-            f"Clientes únicos no mês: {clientes_mes}. Clientes únicos no período: {clientes_periodo}.\n"
-            f"Meta do mês: {format_brl(meta)}. Realizado contra meta: {format_brl(real_meta)}. Falta para meta: {format_brl(falta)}. Percentual da meta: {fmt_pct(pct)}.\n"
-            f"Previsão de fechamento do mês: {format_brl(prev)}. Média diária: {format_brl(media)}. Dias com venda: {dias_com_venda}. Dias úteis considerados: {dias_uteis}.\n"
-            f"{margem_txt}\n"
-            f"{ticket_txt}\n"
-            f"Colunas relevantes disponíveis: {', '.join(cols_relevantes)}."
-        )
-    except Exception as e:
-        return f"Contexto básico disponível. Período filtrado: {dt_ini} até {dt_fim}. Vendedor filtrado: {vendedor_sel}. Erro ao montar contexto resumido: {e}"
+    cls = _classificar_intencao_regras(p)
+    cls["filtros"] = filtros_local
+    cls["comparar_ano1"] = bool(_tem(p, ["ano 1", "ano-1", "ano passado", "ano anterior"]))
+    if filtros_local.get("ano") and not filtros_local.get("mes") and cls.get("tempo") == "mes":
+        cls["tempo"] = "periodo"
+        if str(cls.get("intent", "")).endswith("_mes"):
+            cls["intent"] = str(cls["intent"]).replace("_mes", "_periodo")
+    return cls
 
 
 # -------------------------------------------------
@@ -2262,6 +2302,134 @@ def _agent_risco(df_mes_ref: pd.DataFrame, mes_ref: str, ano_ref: int) -> str:
     return "\n".join(riscos)
 
 
+
+def _resolver_valor_coluna(base_ref: pd.DataFrame, coluna: str, valor) -> tuple[pd.Series, str]:
+    if coluna not in base_ref.columns or valor in [None, ""]:
+        return pd.Series([True] * len(base_ref), index=base_ref.index), ""
+    alvo = _norm_match(valor)
+    serie_norm = base_ref[coluna].fillna("").astype(str).map(_norm_match)
+    mask = serie_norm == alvo
+    if not mask.any() and alvo:
+        mask = serie_norm.str.contains(re.escape(alvo), na=False)
+    return mask, str(valor)
+
+
+def _base_por_tempo_e_filtros(base: pd.DataFrame, tempo: str, filtros: dict, df_hoje: pd.DataFrame, df_mes_ref: pd.DataFrame, df_periodo_agent: pd.DataFrame, hoje_base, ano_ref: int, mes_num_ref: int) -> tuple[pd.DataFrame, str, list[str]]:
+    filtros = filtros or {}
+    aplicados = []
+    try:
+        ano_f = int(filtros.get("ano")) if filtros.get("ano") not in [None, ""] else None
+    except Exception:
+        ano_f = None
+    try:
+        mes_f = int(filtros.get("mes")) if filtros.get("mes") not in [None, ""] else None
+    except Exception:
+        mes_f = None
+
+    if ano_f or mes_f:
+        calc = base.copy()
+        ano_usado = ano_f or ano_ref
+        calc = calc[calc["ANO"] == ano_usado].copy()
+        aplicados.append(f"Ano={ano_usado}")
+        if mes_f:
+            calc = calc[calc["MES_NUM"] == mes_f].copy()
+            aplicados.append(f"Mês={_mes_int_para_nome(mes_f)}/{ano_usado}")
+        label = f"{_mes_int_para_nome(mes_f)}/{ano_usado}" if mes_f else f"ano {ano_usado}"
+    else:
+        calc = _agent_escolher_recorte(tempo, df_hoje, df_mes_ref, df_periodo_agent).copy()
+        label = _agent_periodo_label(tempo, hoje_base, month_key_from_monthnum(mes_num_ref), ano_ref)
+
+    for chave, coluna in {"marca":"MARCA", "linha":"LINHA", "segmento":"SEGMENTO", "cliente":"CLIENTE", "vendedor":"VENDEDOR"}.items():
+        val = filtros.get(chave)
+        if val not in [None, ""] and coluna in calc.columns:
+            mask, label_val = _resolver_valor_coluna(calc, coluna, val)
+            calc = calc[mask].copy()
+            aplicados.append(f"{chave.capitalize()}={label_val}")
+
+    produto = filtros.get("produto")
+    if produto not in [None, ""]:
+        cod_col, desc_col, _ = _agent_coluna_produto(calc)
+        masks = []
+        if desc_col:
+            masks.append(_resolver_valor_coluna(calc, desc_col, produto)[0])
+        if cod_col:
+            masks.append(_resolver_valor_coluna(calc, cod_col, produto)[0])
+        if masks:
+            mask_final = masks[0]
+            for m in masks[1:]:
+                mask_final = mask_final | m
+            calc = calc[mask_final].copy()
+            aplicados.append(f"Produto={produto}")
+
+    return calc, label, aplicados
+
+
+def _contexto_filtros(aplicados: list[str]) -> str:
+    return " | Filtros: " + ", ".join(aplicados) if aplicados else ""
+
+
+def _agent_ano1_com_filtros(base: pd.DataFrame, filtros: dict, ano_ref: int) -> tuple[float, float, float | None]:
+    filtros = dict(filtros or {})
+    ano_atual_calc = int(filtros.get("ano") or ano_ref)
+    atual = base[base["ANO"] == ano_atual_calc].copy()
+    anterior = base[base["ANO"] == ANO_1].copy()
+    if filtros.get("mes"):
+        atual = atual[atual["MES_NUM"] == int(filtros["mes"])].copy()
+        anterior = anterior[anterior["MES_NUM"] == int(filtros["mes"])].copy()
+    for chave, coluna in {"marca":"MARCA", "linha":"LINHA", "segmento":"SEGMENTO", "cliente":"CLIENTE", "vendedor":"VENDEDOR"}.items():
+        val = filtros.get(chave)
+        if val not in [None, ""]:
+            if coluna in atual.columns:
+                atual = atual[_resolver_valor_coluna(atual, coluna, val)[0]].copy()
+            if coluna in anterior.columns:
+                anterior = anterior[_resolver_valor_coluna(anterior, coluna, val)[0]].copy()
+    produto = filtros.get("produto")
+    if produto not in [None, ""]:
+        for qual in ["atual", "anterior"]:
+            d = atual if qual == "atual" else anterior
+            cod_col, desc_col, _ = _agent_coluna_produto(d)
+            mask_final = None
+            for col in [desc_col, cod_col]:
+                if col:
+                    m = _resolver_valor_coluna(d, col, produto)[0]
+                    mask_final = m if mask_final is None else (mask_final | m)
+            d = d[mask_final].copy() if mask_final is not None else d.iloc[0:0].copy()
+            if qual == "atual":
+                atual = d
+            else:
+                anterior = d
+    real = _agent_total(atual)
+    ano1 = _agent_total(anterior)
+    cresc = ((real - ano1) / ano1 * 100) if ano1 else None
+    return real, ano1, cresc
+
+
+def _responder_gemini_livre(pergunta: str) -> str | None:
+    if not _gemini_disponivel():
+        return None
+    api_key = _gemini_api_key()
+    model_name = _gemini_model_name()
+    prompt = f"""
+Você é o ChatBI da Única Atacadista, um assistente de BI conectado ao dashboard comercial.
+Responda de forma objetiva, em português.
+Se a pergunta for geral, responda normalmente.
+Se a pergunta pedir números da empresa, diga que precisa de uma intenção analítica para o Python calcular com segurança.
+Pergunta: {pergunta}
+""".strip()
+    try:
+        if genai_new is not None:
+            client = genai_new.Client(api_key=api_key)
+            resp = client.models.generate_content(model=model_name, contents=prompt, config={"temperature": 0.2})
+            return (getattr(resp, "text", "") or "").strip()
+        if genai_legacy is not None:
+            genai_legacy.configure(api_key=api_key)
+            model = genai_legacy.GenerativeModel(model_name)
+            resp = model.generate_content(prompt, generation_config={"temperature": 0.2})
+            return (getattr(resp, "text", "") or "").strip()
+    except Exception as e:
+        st.session_state["ultimo_erro_gemini"] = str(e)
+    return None
+
 def responder_agente_bi(pergunta: str) -> str:
     base = _agent_base(vendedor_sel)
     df_hoje, df_mes_ref, df_periodo_agent, hoje_base, ano_ref, mes_num_ref, mes_ref = _agent_recortes(base)
@@ -2270,12 +2438,19 @@ def responder_agente_bi(pergunta: str) -> str:
 
     cls = _classificar_intencao(pergunta)
     intent = cls["intent"]
-    entidade = cls["entidade"]
-    tempo = cls["tempo"]
-    recorte = _agent_escolher_recorte(tempo, df_hoje, df_mes_ref, df_periodo_agent)
-    label = _agent_periodo_label(tempo, hoje_base, mes_ref, ano_ref)
+    entidade = cls.get("entidade")
+    tempo = cls.get("tempo", "mes")
+    filtros = cls.get("filtros", {}) if isinstance(cls.get("filtros", {}), dict) else {}
+    recorte, label, filtros_aplicados = _base_por_tempo_e_filtros(
+        base, tempo, filtros, df_hoje, df_mes_ref, df_periodo_agent, hoje_base, ano_ref, mes_num_ref
+    )
     origem_cls = cls.get("origem", "Gemini/regras")
-    contexto = f"\n\nInterpretação: {intent} | Recorte: {label} | Vendedor: {vendedor_sel} | Motor: {origem_cls}."
+    contexto = f"\n\nInterpretação: {intent} | Recorte: {label}{_contexto_filtros(filtros_aplicados)} | Vendedor: {vendedor_sel} | Motor: {origem_cls}."
+
+    # Comparação Ano-1 pode vir junto com filtros de marca/linha/produto/segmento.
+    if cls.get("comparar_ano1") and intent not in ["ano1_falta", "ano1_comparativo", "ano1_projecao"]:
+        real, ano1, cresc = _agent_ano1_com_filtros(base, filtros, ano_ref)
+        return f"Comparativo contra Ano-1:\nRealizado: {format_brl(real)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Diferença: {format_brl(real - ano1)} | Crescimento: {fmt_pct(cresc)}.{contexto}"
 
     # Vendas totais
     if intent in ["venda_hoje", "venda_mes", "venda_periodo"]:
@@ -2331,11 +2506,12 @@ def responder_agente_bi(pergunta: str) -> str:
 
     # Ano-1
     if intent == "ano1_falta":
-        real, ano1, falta, cresc = _agent_ano1_mes(df_mes_ref, mes_ref)
-        return f"Falta para superar o Ano-1 em {mes_ref}: {format_brl(falta)}.\nRealizado: {format_brl(real)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Crescimento atual: {fmt_pct(cresc)}.{contexto}"
+        real, ano1, cresc = _agent_ano1_com_filtros(base, filtros, ano_ref)
+        falta = max(ano1 - real, 0)
+        return f"Falta para superar o Ano-1: {format_brl(falta)}.\nRealizado: {format_brl(real)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Crescimento atual: {fmt_pct(cresc)}.{contexto}"
     if intent == "ano1_comparativo":
-        real, ano1, falta, cresc = _agent_ano1_mes(df_mes_ref, mes_ref)
-        return f"Comparativo contra Ano-1 em {mes_ref}:\nRealizado: {format_brl(real)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Diferença: {format_brl(real - ano1)} | Crescimento: {fmt_pct(cresc)}.{contexto}"
+        real, ano1, cresc = _agent_ano1_com_filtros(base, filtros, ano_ref)
+        return f"Comparativo contra Ano-1:\nRealizado: {format_brl(real)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Diferença: {format_brl(real - ano1)} | Crescimento: {fmt_pct(cresc)}.{contexto}"
     if intent == "ano1_projecao":
         prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
         real, ano1, falta, cresc = _agent_ano1_mes(df_mes_ref, mes_ref)
@@ -2356,17 +2532,15 @@ def responder_agente_bi(pergunta: str) -> str:
     if intent == "risco":
         return _agent_risco(df_mes_ref, mes_ref, ano_ref) + contexto
 
-    # Perguntas gerais ou não classificadas: chama o Gemini livremente.
-    # Ex.: "Olá, quem é você?", "Quanto é 2+2?", "O que você consegue analisar?"
-    contexto_livre = _contexto_resumido_chatbi(base, df_hoje, df_mes_ref, df_periodo_agent, hoje_base, ano_ref, mes_ref)
-    resposta_livre = _gerar_resposta_gemini_livre(pergunta, contexto_livre)
+    resposta_livre = _responder_gemini_livre(pergunta)
     if resposta_livre:
-        return resposta_livre + contexto
+        return f"{resposta_livre}{contexto}"
 
     return (
-        "Não consegui responder essa pergunta porque o Gemini não está disponível e ela não caiu em uma rota local do Python.\n\n"
-        "Confira se o Secrets possui `GEMINI_API_KEY`, se o requirements.txt possui `google-genai` e reinicie o app no Streamlit Cloud.\n"
-        "Enquanto isso, use perguntas mapeadas como: 'quanto vendeu hoje', 'top clientes do mês', 'previsão de fechamento' ou 'quanto falta para meta'."
+        "Não consegui classificar essa pergunta com segurança. Tente combinar assunto + período + ação.\n\n"
+        "Assuntos aceitos: vendas, clientes, marcas, linhas, produtos, vendedores, meta, Ano-1, previsão, margem, ticket, resumo, riscos e oportunidades.\n"
+        "Períodos aceitos: hoje, mês, ano ou período filtrado.\n"
+        "Exemplos: 'cliente que mais comprou 3M em 2026', 'produtos da linha abrasivos em maio', 'marcas por segmento', 'quanto falta para meta', 'comparativo com Ano-1'."
     )
 
 
