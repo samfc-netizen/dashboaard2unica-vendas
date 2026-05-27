@@ -1950,6 +1950,95 @@ def _classificar_intencao(pergunta_original: str) -> dict:
     return _classificar_intencao_regras(p)
 
 
+
+def _gerar_resposta_gemini_livre(pergunta_original: str, contexto_bi: str = "") -> str | None:
+    """
+    Resposta livre com Gemini para perguntas gerais ou perguntas que não caíram
+    nas intenções estruturadas do BI.
+
+    Importante:
+    - Para perguntas de BI mapeadas, o Python/Pandas continua calculando.
+    - Para perguntas gerais, o Gemini responde naturalmente.
+    - Para perguntas de BI não mapeadas, o Gemini recebe apenas um resumo seguro
+      do contexto, sem a base inteira, para evitar lentidão e consumo excessivo.
+    """
+    api_key = _gemini_api_key()
+    if not _gemini_disponivel():
+        return None
+
+    model_name = _gemini_model_name()
+    prompt = f"""
+Você é o ChatBI da Única Atacadista, um assistente de BI comercial integrado a um dashboard em Python/Streamlit.
+
+Regras de resposta:
+1. Responda em português do Brasil, de forma objetiva e natural.
+2. Se a pergunta for uma saudação ou pergunta geral, responda normalmente.
+3. Se a pergunta for sobre indicadores, use somente o contexto resumido abaixo.
+4. Não invente números que não estejam no contexto.
+5. Se precisar de um cálculo que não esteja disponível no contexto, diga que a análise precisa ser feita por uma rota de cálculo do Python.
+6. Não diga que é Gemini; apresente-se como assistente de BI da Única.
+
+Contexto resumido do dashboard:
+{contexto_bi}
+
+Pergunta do usuário:
+{pergunta_original}
+""".strip()
+
+    try:
+        if genai_new is not None:
+            client = genai_new.Client(api_key=api_key)
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={"temperature": 0.2},
+            )
+            return (getattr(resp, "text", "") or "").strip() or None
+        else:
+            genai_legacy.configure(api_key=api_key)
+            model = genai_legacy.GenerativeModel(model_name)
+            resp = model.generate_content(
+                prompt,
+                generation_config={"temperature": 0.2},
+            )
+            return (getattr(resp, "text", "") or "").strip() or None
+    except Exception as e:
+        st.session_state["ultimo_erro_gemini"] = str(e)
+        return None
+
+
+def _contexto_resumido_chatbi(base: pd.DataFrame, df_hoje: pd.DataFrame, df_mes_ref: pd.DataFrame, df_periodo_agent: pd.DataFrame, hoje_base, ano_ref, mes_ref) -> str:
+    """Monta um contexto pequeno para o Gemini responder perguntas gerais sem receber a base inteira."""
+    try:
+        fat_hoje = _agent_total(df_hoje)
+        fat_mes = _agent_total(df_mes_ref)
+        fat_periodo = _agent_total(df_periodo_agent)
+        clientes_mes = df_mes_ref["CLIENTE"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().nunique() if "CLIENTE" in df_mes_ref.columns else 0
+        clientes_periodo = df_periodo_agent["CLIENTE"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().nunique() if "CLIENTE" in df_periodo_agent.columns else 0
+        real_meta, meta, falta, pct = _agent_meta_mes(df_mes_ref, mes_ref)
+        prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
+        margem_txt = _agent_margem(df_mes_ref)
+        ticket_txt = _agent_ticket_medio(df_mes_ref)
+        cols_relevantes = [c for c in ["DATA", "CLIENTE", "MARCA", "LINHA", "VENDEDOR", "CIDADE", "BAIRRO", "VR.TOTAL", "CUSTO"] if c in base.columns]
+        return (
+            f"Período filtrado no dashboard: {dt_ini} até {dt_fim}.\n"
+            f"Última data disponível na base: {hoje_base}.\n"
+            f"Mês de referência: {mes_ref}/{ano_ref}.\n"
+            f"Vendedor filtrado: {vendedor_sel}.\n"
+            f"Faturamento hoje/último dia da base: {format_brl(fat_hoje)}.\n"
+            f"Faturamento do mês de referência: {format_brl(fat_mes)}.\n"
+            f"Faturamento do período filtrado: {format_brl(fat_periodo)}.\n"
+            f"Clientes únicos no mês: {clientes_mes}. Clientes únicos no período: {clientes_periodo}.\n"
+            f"Meta do mês: {format_brl(meta)}. Realizado contra meta: {format_brl(real_meta)}. Falta para meta: {format_brl(falta)}. Percentual da meta: {fmt_pct(pct)}.\n"
+            f"Previsão de fechamento do mês: {format_brl(prev)}. Média diária: {format_brl(media)}. Dias com venda: {dias_com_venda}. Dias úteis considerados: {dias_uteis}.\n"
+            f"{margem_txt}\n"
+            f"{ticket_txt}\n"
+            f"Colunas relevantes disponíveis: {', '.join(cols_relevantes)}."
+        )
+    except Exception as e:
+        return f"Contexto básico disponível. Período filtrado: {dt_ini} até {dt_fim}. Vendedor filtrado: {vendedor_sel}. Erro ao montar contexto resumido: {e}"
+
+
 # -------------------------------------------------
 # Funções de cálculo do agente
 # -------------------------------------------------
@@ -2267,11 +2356,17 @@ def responder_agente_bi(pergunta: str) -> str:
     if intent == "risco":
         return _agent_risco(df_mes_ref, mes_ref, ano_ref) + contexto
 
+    # Perguntas gerais ou não classificadas: chama o Gemini livremente.
+    # Ex.: "Olá, quem é você?", "Quanto é 2+2?", "O que você consegue analisar?"
+    contexto_livre = _contexto_resumido_chatbi(base, df_hoje, df_mes_ref, df_periodo_agent, hoje_base, ano_ref, mes_ref)
+    resposta_livre = _gerar_resposta_gemini_livre(pergunta, contexto_livre)
+    if resposta_livre:
+        return resposta_livre + contexto
+
     return (
-        "Não consegui classificar essa pergunta com segurança. Tente combinar assunto + período + ação.\n\n"
-        "Assuntos aceitos: vendas, clientes, marcas, linhas, produtos, vendedores, meta, Ano-1, previsão, margem, ticket, resumo, riscos e oportunidades.\n"
-        "Períodos aceitos: hoje, mês ou período filtrado.\n"
-        "Exemplos: 'top marcas hoje', 'clientes do mês', 'quanto vendeu hoje', 'quanto falta para meta', 'previsão de fechamento', 'vendedores no período'."
+        "Não consegui responder essa pergunta porque o Gemini não está disponível e ela não caiu em uma rota local do Python.\n\n"
+        "Confira se o Secrets possui `GEMINI_API_KEY`, se o requirements.txt possui `google-genai` e reinicie o app no Streamlit Cloud.\n"
+        "Enquanto isso, use perguntas mapeadas como: 'quanto vendeu hoje', 'top clientes do mês', 'previsão de fechamento' ou 'quanto falta para meta'."
     )
 
 
