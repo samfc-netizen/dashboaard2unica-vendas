@@ -1459,7 +1459,7 @@ else:
 st.divider()
 st.markdown("## ChatBI Única — Perguntas com Gemini")
 st.caption(
-    "Pergunte em linguagem natural. O Gemini interpreta a pergunta, e o Python/Pandas executa os cálculos com base nos dados reais do dashboard."
+    "Pergunte qualquer coisa em linguagem natural. O Gemini sempre interpreta e responde; quando houver pergunta de BI, o Python/Pandas calcula os números e o Gemini transforma em análise consultiva."
 )
 
 
@@ -2404,27 +2404,78 @@ def _agent_ano1_com_filtros(base: pd.DataFrame, filtros: dict, ano_ref: int) -> 
     return real, ano1, cresc
 
 
-def _responder_gemini_livre(pergunta: str) -> str | None:
+def _gerar_contexto_geral_chatbi(base: pd.DataFrame | None = None, recorte: pd.DataFrame | None = None, label: str = "") -> str:
+    """
+    Monta um contexto leve para o Gemini responder qualquer pergunta, inclusive perguntas gerais.
+    Não manda a base inteira: só indicadores consolidados e dimensões disponíveis.
+    """
+    try:
+        base_ref = base if isinstance(base, pd.DataFrame) and not base.empty else df
+        rec_ref = recorte if isinstance(recorte, pd.DataFrame) and recorte is not None else base_ref
+        if rec_ref is None or rec_ref.empty:
+            rec_ref = base_ref
+
+        partes = []
+        partes.append(f"Dashboard: Única Atacadista / ChatBI Comercial.")
+        if label:
+            partes.append(f"Recorte atual: {label}.")
+        partes.append(f"Vendedor filtrado: {vendedor_sel}.")
+        partes.append(f"Linhas disponíveis no recorte: {len(rec_ref):,}.".replace(',', '.'))
+        if 'VR_TOTAL' in rec_ref.columns:
+            partes.append(f"Faturamento do recorte: {format_brl(float(rec_ref['VR_TOTAL'].sum()))}.")
+        if 'CLIENTE' in rec_ref.columns:
+            partes.append(f"Clientes ativos no recorte: {rec_ref['CLIENTE'].fillna('').astype(str).map(norm_text).replace('', pd.NA).dropna().nunique():,}.".replace(',', '.'))
+        if 'MARCA' in rec_ref.columns and 'VR_TOTAL' in rec_ref.columns:
+            top_marcas = (rec_ref.groupby('MARCA', as_index=False)['VR_TOTAL'].sum().sort_values('VR_TOTAL', ascending=False).head(5))
+            partes.append('Top marcas no recorte: ' + '; '.join([f"{str(r['MARCA'])}: {format_brl(r['VR_TOTAL'])}" for _, r in top_marcas.iterrows()]) + '.')
+        if 'CLIENTE' in rec_ref.columns and 'VR_TOTAL' in rec_ref.columns:
+            top_clientes = (rec_ref.groupby('CLIENTE', as_index=False)['VR_TOTAL'].sum().sort_values('VR_TOTAL', ascending=False).head(5))
+            partes.append('Top clientes no recorte: ' + '; '.join([f"{str(r['CLIENTE'])}: {format_brl(r['VR_TOTAL'])}" for _, r in top_clientes.iterrows()]) + '.')
+        if 'LINHA' in rec_ref.columns and 'VR_TOTAL' in rec_ref.columns:
+            top_linhas = (rec_ref.groupby('LINHA', as_index=False)['VR_TOTAL'].sum().sort_values('VR_TOTAL', ascending=False).head(5))
+            partes.append('Top linhas no recorte: ' + '; '.join([f"{str(r['LINHA'])}: {format_brl(r['VR_TOTAL'])}" for _, r in top_linhas.iterrows()]) + '.')
+        return '\n'.join(partes)
+    except Exception as e:
+        return f"Contexto geral indisponível: {e}"
+
+
+def _responder_gemini_livre(pergunta: str, contexto_geral: str = "") -> str | None:
+    """
+    Resposta livre do Gemini. Usada para QUALQUER pergunta que não caia numa rota de cálculo.
+    Não existe mais bloqueio por intenção: o Gemini sempre deve tentar responder.
+    """
     if not _gemini_disponivel():
         return None
     api_key = _gemini_api_key()
     model_name = _gemini_model_name()
     prompt = f"""
-Você é o ChatBI da Única Atacadista, um assistente de BI conectado ao dashboard comercial.
-Responda de forma objetiva, em português.
-Se a pergunta for geral, responda normalmente.
-Se a pergunta pedir números da empresa, diga que precisa de uma intenção analítica para o Python calcular com segurança.
-Pergunta: {pergunta}
+Você é o ChatBI da Única Atacadista, um assistente de BI e consultor comercial conectado ao dashboard.
+
+OBJETIVO:
+Responder TUDO que o usuário perguntar, em português do Brasil, com linguagem clara, natural e consultiva.
+
+REGRAS:
+1. Se a pergunta for geral, responda normalmente.
+2. Se a pergunta for sobre o funcionamento do ChatBI, explique como você interpreta dados: primeiro entende a pergunta, depois usa os dados/cálculos disponíveis e transforma em leitura gerencial.
+3. Se a pergunta pedir números específicos e eles não estiverem no contexto abaixo, explique que precisa calcular pelo Pandas ou peça um recorte mais específico, mas NUNCA diga “não consegui classificar”.
+4. Não invente números. Use apenas os números do contexto quando existirem.
+5. Use tom de consultoria empresarial: explique o que o resultado significa, riscos, oportunidades e próximos passos quando fizer sentido.
+
+CONTEXTO DISPONÍVEL DO DASHBOARD:
+{contexto_geral}
+
+PERGUNTA DO USUÁRIO:
+{pergunta}
 """.strip()
     try:
         if genai_new is not None:
             client = genai_new.Client(api_key=api_key)
-            resp = client.models.generate_content(model=model_name, contents=prompt, config={"temperature": 0.2})
+            resp = client.models.generate_content(model=model_name, contents=prompt, config={"temperature": 0.35})
             return (getattr(resp, "text", "") or "").strip()
         if genai_legacy is not None:
             genai_legacy.configure(api_key=api_key)
             model = genai_legacy.GenerativeModel(model_name)
-            resp = model.generate_content(prompt, generation_config={"temperature": 0.2})
+            resp = model.generate_content(prompt, generation_config={"temperature": 0.35})
             return (getattr(resp, "text", "") or "").strip()
     except Exception as e:
         st.session_state["ultimo_erro_gemini"] = str(e)
@@ -2522,6 +2573,19 @@ def responder_agente_bi(pergunta: str) -> str:
     contexto = f"\n\nInterpretação: {intent} | Recorte: {label}{_contexto_filtros(filtros_aplicados)} | Vendedor: {vendedor_sel} | Motor: Gemini + Pandas."
 
     dados_calculados = None
+
+    # Perguntas gerais / não mapeadas: quem responde é SEMPRE o Gemini.
+    # Não existe mais bloqueio do tipo "não consegui classificar".
+    if intent == "nao_mapeada":
+        contexto_geral = _gerar_contexto_geral_chatbi(base, recorte, label)
+        resposta_livre = _responder_gemini_livre(pergunta, contexto_geral)
+        if resposta_livre:
+            contexto_livre = f"\n\nInterpretação: pergunta_livre | Recorte: {label}{_contexto_filtros(filtros_aplicados)} | Vendedor: {vendedor_sel} | Motor: Gemini."
+            return f"{resposta_livre}{contexto_livre}"
+        return (
+            "O Gemini não conseguiu responder neste momento. Verifique a chave GEMINI_API_KEY, o modelo configurado e os logs do Streamlit."
+            f"\n\nInterpretação: pergunta_livre | Recorte: {label}{_contexto_filtros(filtros_aplicados)} | Vendedor: {vendedor_sel} | Motor: Gemini indisponível."
+        )
 
     # Comparação Ano-1 pode vir junto com filtros de marca/linha/produto/segmento.
     if cls.get("comparar_ano1") and intent not in ["ano1_falta", "ano1_comparativo", "ano1_projecao"]:
@@ -2678,28 +2742,26 @@ def responder_agente_bi(pergunta: str) -> str:
         dados_calculados = _agent_risco(df_mes_ref, mes_ref, ano_ref)
         return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
-    # Perguntas gerais: Gemini responde sem cálculo.
-    resposta_livre = _responder_gemini_livre(pergunta)
+    # Qualquer rota não prevista também vai para o Gemini.
+    contexto_geral = _gerar_contexto_geral_chatbi(base, recorte, label)
+    resposta_livre = _responder_gemini_livre(pergunta, contexto_geral)
     if resposta_livre:
-        contexto_livre = f"\n\nInterpretação: {intent} | Recorte: {label}{_contexto_filtros(filtros_aplicados)} | Vendedor: {vendedor_sel} | Motor: Gemini."
+        contexto_livre = f"\n\nInterpretação: pergunta_livre | Recorte: {label}{_contexto_filtros(filtros_aplicados)} | Vendedor: {vendedor_sel} | Motor: Gemini."
         return f"{resposta_livre}{contexto_livre}"
 
-    dados_calculados = (
-        "Não consegui classificar essa pergunta com segurança.\n"
-        "Assuntos aceitos: vendas, clientes, marcas, linhas, produtos, vendedores, meta, Ano-1, previsão, margem, ticket, resumo, riscos e oportunidades.\n"
-        "Períodos aceitos: hoje, mês, ano ou período filtrado.\n"
-        "Exemplos: 'cliente que mais comprou 3M em 2026', 'produtos da linha abrasivos em maio', 'marcas por segmento', 'quanto falta para meta', 'comparativo com Ano-1'."
+    return (
+        "O Gemini não conseguiu responder neste momento. Verifique a chave GEMINI_API_KEY, o modelo configurado e os logs do Streamlit."
+        f"\n\nInterpretação: pergunta_livre | Recorte: {label}{_contexto_filtros(filtros_aplicados)} | Vendedor: {vendedor_sel} | Motor: Gemini indisponível."
     )
-    return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
 
 with st.container():
     if genai_new is None and genai_legacy is None:
         st.warning("Biblioteca do Gemini não encontrada. Adicione `google-genai` no requirements.txt.")
     elif not _gemini_api_key():
-        st.warning("Chave do Gemini não configurada. No Streamlit Cloud, adicione `GEMINI_API_KEY` em Secrets. Enquanto isso, o app usará o fallback por regras.")
+        st.warning("Chave do Gemini não configurada. No Streamlit Cloud, adicione `GEMINI_API_KEY` em Secrets. Sem essa chave, o ChatBI não consegue responder tudo via Gemini.")
     else:
-        st.success(f"Gemini configurado. Modelo ativo: `{_gemini_model_name()}`. O ChatBI já pode interpretar perguntas com IA.")
+        st.success(f"Gemini configurado. Modelo ativo: `{_gemini_model_name()}`. O ChatBI responderá todas as perguntas via Gemini; quando necessário, usará Pandas para calcular os dados antes da resposta consultiva.")
         if "ultimo_erro_gemini" in st.session_state:
             with st.expander("Último erro do Gemini"):
                 st.code(st.session_state["ultimo_erro_gemini"])
