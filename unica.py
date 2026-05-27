@@ -2430,6 +2430,80 @@ Pergunta: {pergunta}
         st.session_state["ultimo_erro_gemini"] = str(e)
     return None
 
+def _gerar_texto_consultivo_gemini(pergunta: str, dados_calculados: str, contexto_tecnico: str = "") -> str | None:
+    """
+    Usa o Gemini como camada final de consultoria.
+    O Python/Pandas calcula os números; o Gemini interpreta e transforma em resposta executiva.
+    """
+    if not _gemini_disponivel():
+        return None
+
+    api_key = _gemini_api_key()
+    model_name = _gemini_model_name()
+
+    prompt = f"""
+Você é o ChatBI da Única Atacadista, atuando como consultor empresarial sênior.
+
+Sua função é transformar os dados calculados pelo Python/Pandas em uma resposta executiva, consultiva e clara para diretoria comercial.
+
+REGRAS OBRIGATÓRIAS:
+1. Não invente números, clientes, marcas, produtos, percentuais ou conclusões que não estejam sustentadas nos dados abaixo.
+2. Preserve os valores calculados. Não recalcule mentalmente se não houver base suficiente.
+3. Use linguagem natural, gerencial e objetiva.
+4. Não responda apenas em lista crua; explique o que os números indicam.
+5. Quando fizer sentido, destaque: principal resultado, concentração, risco, oportunidade e ação recomendada.
+6. Se os dados forem insuficientes ou vazios, diga isso de forma clara e sugira uma pergunta mais específica.
+7. Responda sempre em português do Brasil.
+8. Não mencione que os dados vieram de prompt, código, função, API ou modelo.
+
+PERGUNTA DO USUÁRIO:
+{pergunta}
+
+DADOS CALCULADOS PELO PYTHON/PANDAS:
+{dados_calculados}
+
+CONTEXTO TÉCNICO DO RECORTE:
+{contexto_tecnico}
+
+FORMATO DE RESPOSTA ESPERADO:
+- Comece com a resposta direta.
+- Depois traga uma leitura gerencial.
+- Depois, quando aplicável, traga riscos/oportunidades.
+- Feche com uma ação recomendada.
+""".strip()
+
+    try:
+        if genai_new is not None:
+            client = genai_new.Client(api_key=api_key)
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={"temperature": 0.35},
+            )
+            return (getattr(resp, "text", "") or "").strip()
+        if genai_legacy is not None:
+            genai_legacy.configure(api_key=api_key)
+            model = genai_legacy.GenerativeModel(model_name)
+            resp = model.generate_content(prompt, generation_config={"temperature": 0.35})
+            return (getattr(resp, "text", "") or "").strip()
+    except Exception as e:
+        st.session_state["ultimo_erro_gemini"] = str(e)
+    return None
+
+
+def _finalizar_resposta_chatbi(pergunta: str, dados_calculados: str, contexto: str, usar_gemini: bool = True) -> str:
+    """
+    Camada final do ChatBI: sempre tenta usar Gemini para redigir a resposta consultiva.
+    Se a API falhar, entrega os dados calculados pelo Pandas como fallback.
+    """
+    contexto_gemini = contexto.replace("Motor:", "Motor de cálculo:")
+    if usar_gemini:
+        texto_ia = _gerar_texto_consultivo_gemini(pergunta, dados_calculados, contexto_gemini)
+        if texto_ia:
+            return f"{texto_ia}\n\n{contexto.replace('Motor: ' + contexto.split('Motor: ')[-1].rstrip('.'), 'Motor: Gemini + Pandas')}"
+    return f"{dados_calculados}{contexto}\n\nObservação: o cálculo foi feito pelo Python/Pandas, mas o Gemini não conseguiu redigir a análise final neste momento."
+
+
 def responder_agente_bi(pergunta: str) -> str:
     base = _agent_base(vendedor_sel)
     df_hoje, df_mes_ref, df_periodo_agent, hoje_base, ano_ref, mes_num_ref, mes_ref = _agent_recortes(base)
@@ -2445,103 +2519,178 @@ def responder_agente_bi(pergunta: str) -> str:
         base, tempo, filtros, df_hoje, df_mes_ref, df_periodo_agent, hoje_base, ano_ref, mes_num_ref
     )
     origem_cls = cls.get("origem", "Gemini/regras")
-    contexto = f"\n\nInterpretação: {intent} | Recorte: {label}{_contexto_filtros(filtros_aplicados)} | Vendedor: {vendedor_sel} | Motor: {origem_cls}."
+    contexto = f"\n\nInterpretação: {intent} | Recorte: {label}{_contexto_filtros(filtros_aplicados)} | Vendedor: {vendedor_sel} | Motor: Gemini + Pandas."
+
+    dados_calculados = None
 
     # Comparação Ano-1 pode vir junto com filtros de marca/linha/produto/segmento.
     if cls.get("comparar_ano1") and intent not in ["ano1_falta", "ano1_comparativo", "ano1_projecao"]:
         real, ano1, cresc = _agent_ano1_com_filtros(base, filtros, ano_ref)
-        return f"Comparativo contra Ano-1:\nRealizado: {format_brl(real)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Diferença: {format_brl(real - ano1)} | Crescimento: {fmt_pct(cresc)}.{contexto}"
+        dados_calculados = (
+            f"Comparativo contra Ano-1:\n"
+            f"Realizado: {format_brl(real)}\n"
+            f"Ano-1 ({ANO_1}): {format_brl(ano1)}\n"
+            f"Diferença: {format_brl(real - ano1)}\n"
+            f"Crescimento: {fmt_pct(cresc)}"
+        )
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
     # Vendas totais
     if intent in ["venda_hoje", "venda_mes", "venda_periodo"]:
-        return f"Venda no recorte {label}: {format_brl(_agent_total(recorte))}.{contexto}"
+        dados_calculados = f"Venda no recorte {label}: {format_brl(_agent_total(recorte))}."
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
     # Rankings por entidade
     if intent.startswith("cliente_") and not intent.startswith("clientes_quantidade"):
-        return f"Ranking de clientes — {label}:\n{_agent_top(recorte, 'CLIENTE', 'Cliente', 10)}{contexto}"
+        dados_calculados = f"Ranking de clientes — {label}:\n{_agent_top(recorte, 'CLIENTE', 'Cliente', 10)}"
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent.startswith("marca_"):
-        return f"Ranking de marcas — {label}:\n{_agent_top(recorte, 'MARCA', 'Marca', 10)}{contexto}"
+        dados_calculados = f"Ranking de marcas — {label}:\n{_agent_top(recorte, 'MARCA', 'Marca', 10)}"
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent.startswith("linha_"):
-        return f"Ranking de linhas — {label}:\n{_agent_top(recorte, 'LINHA', 'Linha', 10)}{contexto}"
+        dados_calculados = f"Ranking de linhas — {label}:\n{_agent_top(recorte, 'LINHA', 'Linha', 10)}"
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent.startswith("produto_"):
-        return f"Ranking de produtos — {label}:\n{_agent_top_produtos(recorte, 10)}{contexto}"
+        dados_calculados = f"Ranking de produtos — {label}:\n{_agent_top_produtos(recorte, 10)}"
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent.startswith("vendedor_"):
-        return f"Ranking de vendedores — {label}:\n{_agent_top(recorte, 'VENDEDOR', 'Vendedor', 10)}{contexto}"
+        dados_calculados = f"Ranking de vendedores — {label}:\n{_agent_top(recorte, 'VENDEDOR', 'Vendedor', 10)}"
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
     # Quantidade de clientes
     if intent.startswith("clientes_quantidade"):
-        return f"{_agent_quantidade_clientes(recorte)}{contexto}"
+        dados_calculados = _agent_quantidade_clientes(recorte)
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
     # Previsão
     if intent == "previsao_fechamento":
         prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
         real, meta, falta_meta, pct_meta = _agent_meta_mes(df_mes_ref, mes_ref)
         _, ano1, falta_ano1, cresc = _agent_ano1_mes(df_mes_ref, mes_ref)
-        return (
+        dados_calculados = (
             f"Previsão de fechamento de {mes_ref}/{ano_ref}: {format_brl(prev)}.\n"
-            f"Realizado: {format_brl(real)} | Média diária: {format_brl(media)} | Dias com venda: {dias_com_venda} | Dias úteis considerados: {dias_uteis}.\n"
-            f"Contra meta: {fmt_pct((prev / meta * 100) if meta else None)} da meta projetada.\n"
-            f"Contra Ano-1: {fmt_pct(((prev - ano1) / ano1 * 100) if ano1 else None)} projetado."
-            f"{contexto}"
+            f"Realizado: {format_brl(real)}\n"
+            f"Média diária: {format_brl(media)}\n"
+            f"Dias com venda: {dias_com_venda}\n"
+            f"Dias úteis considerados: {dias_uteis}\n"
+            f"Meta: {format_brl(meta)}\n"
+            f"Percentual projetado da meta: {fmt_pct((prev / meta * 100) if meta else None)}\n"
+            f"Ano-1: {format_brl(ano1)}\n"
+            f"Crescimento projetado contra Ano-1: {fmt_pct(((prev - ano1) / ano1 * 100) if ano1 else None)}"
         )
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
     # Meta
     if intent == "meta_falta":
         real, meta, falta, pct = _agent_meta_mes(df_mes_ref, mes_ref)
-        return f"Falta para bater a meta de {mes_ref}/{ano_ref}: {format_brl(falta)}.\nRealizado: {format_brl(real)} | Meta: {format_brl(meta)} | Atingido: {fmt_pct(pct)}.{contexto}"
+        dados_calculados = (
+            f"Meta de {mes_ref}/{ano_ref}: {format_brl(meta)}\n"
+            f"Realizado: {format_brl(real)}\n"
+            f"Falta para bater a meta: {format_brl(falta)}\n"
+            f"Percentual atingido: {fmt_pct(pct)}"
+        )
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent == "meta_percentual":
         real, meta, falta, pct = _agent_meta_mes(df_mes_ref, mes_ref)
-        return f"Percentual da meta atingido em {mes_ref}/{ano_ref}: {fmt_pct(pct)}.\nRealizado: {format_brl(real)} | Meta: {format_brl(meta)} | Falta: {format_brl(falta)}.{contexto}"
+        dados_calculados = (
+            f"Percentual da meta atingido em {mes_ref}/{ano_ref}: {fmt_pct(pct)}\n"
+            f"Realizado: {format_brl(real)}\n"
+            f"Meta: {format_brl(meta)}\n"
+            f"Falta: {format_brl(falta)}"
+        )
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent == "meta_projecao":
         prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
         real, meta, falta, pct = _agent_meta_mes(df_mes_ref, mes_ref)
-        status = "Sim, pela previsão atual tende a bater a meta." if prev >= meta and meta else "Não, pela previsão atual ainda não bate a meta."
-        return f"{status}\nPrevisão: {format_brl(prev)} | Meta: {format_brl(meta)} | Diferença projetada: {format_brl(prev - meta)}.{contexto}"
+        status = "Pela previsão atual tende a bater a meta." if prev >= meta and meta else "Pela previsão atual ainda não bate a meta."
+        dados_calculados = (
+            f"{status}\n"
+            f"Previsão: {format_brl(prev)}\n"
+            f"Meta: {format_brl(meta)}\n"
+            f"Diferença projetada: {format_brl(prev - meta)}\n"
+            f"Realizado atual: {format_brl(real)}"
+        )
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent == "meta_dia":
         real, meta, falta, pct = _agent_meta_mes(df_mes_ref, mes_ref)
         prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
         dias_restantes_estimados = max(dias_uteis - dias_com_venda, 1)
         necessidade_dia = falta / dias_restantes_estimados if falta else 0.0
-        return f"Para bater a meta de {mes_ref}/{ano_ref}, falta {format_brl(falta)}.\nNecessidade média estimada: {format_brl(necessidade_dia)} por dia útil restante estimado.\nRealizado: {format_brl(real)} | Meta: {format_brl(meta)}.{contexto}"
+        dados_calculados = (
+            f"Para bater a meta de {mes_ref}/{ano_ref}, falta {format_brl(falta)}.\n"
+            f"Necessidade média estimada por dia útil restante: {format_brl(necessidade_dia)}\n"
+            f"Realizado: {format_brl(real)}\n"
+            f"Meta: {format_brl(meta)}\n"
+            f"Dias úteis restantes estimados: {dias_restantes_estimados}"
+        )
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
     # Ano-1
     if intent == "ano1_falta":
         real, ano1, cresc = _agent_ano1_com_filtros(base, filtros, ano_ref)
         falta = max(ano1 - real, 0)
-        return f"Falta para superar o Ano-1: {format_brl(falta)}.\nRealizado: {format_brl(real)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Crescimento atual: {fmt_pct(cresc)}.{contexto}"
+        dados_calculados = (
+            f"Falta para superar o Ano-1: {format_brl(falta)}\n"
+            f"Realizado: {format_brl(real)}\n"
+            f"Ano-1 ({ANO_1}): {format_brl(ano1)}\n"
+            f"Crescimento atual: {fmt_pct(cresc)}"
+        )
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent == "ano1_comparativo":
         real, ano1, cresc = _agent_ano1_com_filtros(base, filtros, ano_ref)
-        return f"Comparativo contra Ano-1:\nRealizado: {format_brl(real)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Diferença: {format_brl(real - ano1)} | Crescimento: {fmt_pct(cresc)}.{contexto}"
+        dados_calculados = (
+            f"Comparativo contra Ano-1:\n"
+            f"Realizado: {format_brl(real)}\n"
+            f"Ano-1 ({ANO_1}): {format_brl(ano1)}\n"
+            f"Diferença: {format_brl(real - ano1)}\n"
+            f"Crescimento: {fmt_pct(cresc)}"
+        )
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent == "ano1_projecao":
         prev, media, dias_uteis, dias_com_venda = _agent_previsao(df_mes_ref, mes_ref)
         real, ano1, falta, cresc = _agent_ano1_mes(df_mes_ref, mes_ref)
         status = "tende a superar o Ano-1" if prev >= ano1 and ano1 else "ainda tende a fechar abaixo do Ano-1"
-        return f"Pela previsão atual, {status}.\nPrevisão: {format_brl(prev)} | Ano-1 ({ANO_1}): {format_brl(ano1)} | Diferença projetada: {format_brl(prev - ano1)}.{contexto}"
+        dados_calculados = (
+            f"Pela previsão atual, {status}.\n"
+            f"Previsão: {format_brl(prev)}\n"
+            f"Ano-1 ({ANO_1}): {format_brl(ano1)}\n"
+            f"Diferença projetada: {format_brl(prev - ano1)}\n"
+            f"Realizado atual: {format_brl(real)}"
+        )
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
     # Margem e ticket
     if intent.startswith("margem"):
-        return f"{_agent_margem(recorte)}{contexto}"
+        dados_calculados = _agent_margem(recorte)
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent.startswith("ticket"):
-        return f"{_agent_ticket_medio(recorte)}{contexto}"
+        dados_calculados = _agent_ticket_medio(recorte)
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
     # Executivo
     if intent == "resumo_executivo":
-        return _agent_resumo_executivo(base) + contexto
+        dados_calculados = _agent_resumo_executivo(base)
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent == "oportunidade":
-        return _agent_oportunidade(df_mes_ref, mes_ref, ano_ref) + contexto
+        dados_calculados = _agent_oportunidade(df_mes_ref, mes_ref, ano_ref)
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
     if intent == "risco":
-        return _agent_risco(df_mes_ref, mes_ref, ano_ref) + contexto
+        dados_calculados = _agent_risco(df_mes_ref, mes_ref, ano_ref)
+        return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
+    # Perguntas gerais: Gemini responde sem cálculo.
     resposta_livre = _responder_gemini_livre(pergunta)
     if resposta_livre:
-        return f"{resposta_livre}{contexto}"
+        contexto_livre = f"\n\nInterpretação: {intent} | Recorte: {label}{_contexto_filtros(filtros_aplicados)} | Vendedor: {vendedor_sel} | Motor: Gemini."
+        return f"{resposta_livre}{contexto_livre}"
 
-    return (
-        "Não consegui classificar essa pergunta com segurança. Tente combinar assunto + período + ação.\n\n"
+    dados_calculados = (
+        "Não consegui classificar essa pergunta com segurança.\n"
         "Assuntos aceitos: vendas, clientes, marcas, linhas, produtos, vendedores, meta, Ano-1, previsão, margem, ticket, resumo, riscos e oportunidades.\n"
         "Períodos aceitos: hoje, mês, ano ou período filtrado.\n"
         "Exemplos: 'cliente que mais comprou 3M em 2026', 'produtos da linha abrasivos em maio', 'marcas por segmento', 'quanto falta para meta', 'comparativo com Ano-1'."
     )
+    return _finalizar_resposta_chatbi(pergunta, dados_calculados, contexto)
 
 
 with st.container():
