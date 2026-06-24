@@ -526,6 +526,137 @@ df["ANO"] = df["DATA"].dt.year
 df["MES_NUM"] = df["DATA"].dt.month
 df["MES"] = df["MES_NUM"].map(month_key_from_monthnum)
 df["DIA"] = df["DATA"].dt.date
+
+
+# =========================
+# RELATÓRIOS WHATSAPP
+# =========================
+WHATSAPP_REPORT_UNICA = "5561993215052"
+
+
+def _safe_dim(df_in: pd.DataFrame, col: str, fallback: str) -> pd.Series:
+    if col not in df_in.columns:
+        return pd.Series([fallback] * len(df_in), index=df_in.index, dtype="string")
+    s = df_in[col].fillna(fallback).astype(str).map(norm_text)
+    s = s.replace("", fallback)
+    return s
+
+
+def _ranking_texto(df_in: pd.DataFrame, col: str, total: float, titulo: str, top_n: int | None = None) -> str:
+    if df_in.empty or col not in df_in.columns:
+        return f"{titulo}:\n- Sem dados"
+
+    dfx = df_in.copy()
+    dfx[col] = _safe_dim(dfx, col, "N/I")
+    tbl = (
+        dfx.groupby(col, as_index=False)["VR_TOTAL"].sum()
+        .sort_values("VR_TOTAL", ascending=False)
+    )
+    if top_n is not None:
+        tbl = tbl.head(top_n)
+
+    linhas = [f"{titulo}:"]
+    for _, row in tbl.iterrows():
+        valor = float(row["VR_TOTAL"])
+        pct = (valor / total * 100) if total else 0.0
+        linhas.append(f"- {row[col]}: {format_brl(valor)} ({fmt_pct(pct)})")
+    return "\n".join(linhas)
+
+
+def _previsao_fechamento_mes(df_mes: pd.DataFrame, mes_key: str) -> tuple[float, int, float]:
+    dias_uteis = int(DIAS_UTEIS_MENSAL.get(mes_key, 0))
+    if df_mes.empty:
+        return 0.0, dias_uteis, 0.0
+    venda_por_dia = df_mes.groupby("DIA", as_index=False)["VR_TOTAL"].sum()
+    venda_por_dia = venda_por_dia[venda_por_dia["VR_TOTAL"] > 0]
+    media_dias_com_venda = float(venda_por_dia["VR_TOTAL"].mean()) if not venda_por_dia.empty else 0.0
+    return media_dias_com_venda * dias_uteis, dias_uteis, media_dias_com_venda
+
+
+def montar_report_unica(df_base: pd.DataFrame, data_ref) -> str:
+    data_ref = pd.to_datetime(data_ref).date()
+    mes_num = data_ref.month
+    ano = data_ref.year
+    mes_key = month_key_from_monthnum(mes_num)
+
+    df_dia = df_base[df_base["DIA"] == data_ref].copy()
+    df_mes = df_base[(df_base["ANO"] == ano) & (df_base["MES_NUM"] == mes_num) & (df_base["DIA"] <= data_ref)].copy()
+
+    venda_dia = float(df_dia["VR_TOTAL"].sum()) if not df_dia.empty else 0.0
+    venda_mes = float(df_mes["VR_TOTAL"].sum()) if not df_mes.empty else 0.0
+    prev_mes, dias_uteis, media_dia = _previsao_fechamento_mes(df_mes, mes_key)
+
+    data_txt = data_ref.strftime("%d/%m/%Y")
+    linhas = [
+        f"REPORT ÚNICA - {data_txt}",
+        "",
+        f"REPORT DO DIA - {data_txt}",
+        f"Venda do dia: {format_brl(venda_dia)}",
+        "Previsão de fechamento: não aplicável para o recorte diário.",
+        "",
+        _ranking_texto(df_dia, "VENDEDOR", venda_dia, "Vendas por vendedor", top_n=None),
+        "",
+        _ranking_texto(df_dia, "SEGMENTO", venda_dia, "Vendas por segmento", top_n=None),
+        "",
+        _ranking_texto(df_dia, "MARCA", venda_dia, "Top 10 marcas", top_n=10),
+        "",
+        _ranking_texto(df_dia, "CLIENTE", venda_dia, "Top 10 clientes", top_n=10),
+        "",
+        f"REPORT DO MÊS VIGENTE - {mes_key}/{ano}",
+        f"Venda do mês: {format_brl(venda_mes)}",
+        f"Previsão de fechamento: {format_brl(prev_mes)} ({dias_uteis} dias úteis; média dos dias com venda: {format_brl(media_dia)})",
+        "",
+        _ranking_texto(df_mes, "VENDEDOR", venda_mes, "Vendas por vendedor", top_n=None),
+        "",
+        _ranking_texto(df_mes, "SEGMENTO", venda_mes, "Vendas por segmento", top_n=None),
+        "",
+        _ranking_texto(df_mes, "MARCA", venda_mes, "Top 10 marcas", top_n=10),
+        "",
+        _ranking_texto(df_mes, "CLIENTE", venda_mes, "Top 10 clientes", top_n=10),
+    ]
+    return "\n".join(linhas)
+
+
+def render_relatorios_unica(df_base: pd.DataFrame, min_data, max_data):
+    import urllib.parse
+
+    st.markdown("## Relatórios")
+    st.caption("Gera o texto do movimento do dia e do mês vigente, pronto para envio no WhatsApp.")
+
+    data_ref = st.date_input(
+        "Data do relatório",
+        value=max_data,
+        min_value=min_data,
+        max_value=max_data,
+        key="relatorio_unica_data_ref",
+    )
+
+    texto = montar_report_unica(df_base, data_ref)
+    url = f"https://wa.me/{WHATSAPP_REPORT_UNICA}?text={urllib.parse.quote(texto)}"
+
+    c1, c2, c3 = st.columns(3)
+    df_dia = df_base[df_base["DIA"] == data_ref].copy()
+    df_mes = df_base[(df_base["ANO"] == data_ref.year) & (df_base["MES_NUM"] == data_ref.month) & (df_base["DIA"] <= data_ref)].copy()
+    with c1:
+        st.metric("Venda do dia", format_brl(float(df_dia["VR_TOTAL"].sum()) if not df_dia.empty else 0.0))
+    with c2:
+        st.metric("Venda do mês vigente", format_brl(float(df_mes["VR_TOTAL"].sum()) if not df_mes.empty else 0.0))
+    with c3:
+        mes_key = month_key_from_monthnum(data_ref.month)
+        prev_mes, _, _ = _previsao_fechamento_mes(df_mes, mes_key)
+        st.metric("Previsão fechamento mês", format_brl(prev_mes))
+
+    st.link_button("Abrir WhatsApp com texto pronto", url, use_container_width=True)
+    st.download_button(
+        "Baixar texto .txt",
+        data=texto.encode("utf-8"),
+        file_name=f"report_unica_{data_ref.strftime('%Y_%m_%d')}.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+
+    st.markdown("### Texto gerado")
+    st.text_area("Copie ou revise antes de enviar", value=texto, height=620)
 # =========================
 # Sidebar filtros
 # =========================
@@ -534,6 +665,7 @@ max_dt = df["DATA"].max().date()
 if "vendedor_sel" not in st.session_state:
     st.session_state["vendedor_sel"] = "TODOS"
 with st.sidebar:
+    pagina_app = st.radio("Página", ["Dashboard", "Relatórios"], index=0)
     st.header("Filtros")
 
     filtro_tipo = st.radio("Tipo de filtro", ["Período (DATA)", "Mês (ANO/MÊS)"], index=0)
@@ -601,6 +733,10 @@ if vendedor_sel != "TODOS" and "VENDEDOR" in df_periodo_all.columns:
     ].copy()
 else:
     df_periodo = df_periodo_all.copy()
+
+if pagina_app == "Relatórios":
+    render_relatorios_unica(df, min_dt, max_dt)
+    st.stop()
 
 st.session_state["pdf_sections"] = []
 
