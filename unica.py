@@ -8,6 +8,7 @@ from datetime import datetime
 import unicodedata
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.colors as pc
@@ -618,11 +619,100 @@ def montar_report_unica(df_base: pd.DataFrame, data_ref) -> str:
 
 
 def render_relatorios_unica(df_base: pd.DataFrame, min_data, max_data):
-    import urllib.parse
+    """Aba Relatórios com UX melhorada e envio via WhatsApp sem limite de URL.
 
-    st.markdown("## Relatórios")
-    st.caption("Gera o texto do movimento do dia e do mês vigente, pronto para envio no WhatsApp.")
+    Fluxo do botão principal:
+    1) copia o relatório completo para a área de transferência do navegador;
+    2) abre o WhatsApp no contato configurado;
+    3) o usuário cola o texto completo na conversa.
+    """
+    import json
 
+    st.markdown("""
+    <style>
+    .rel-hero {
+        background: linear-gradient(135deg, #0f172a 0%, #14532d 100%);
+        border: 1px solid rgba(255,255,255,0.14);
+        border-radius: 22px;
+        padding: 24px 26px;
+        margin-bottom: 18px;
+        box-shadow: 0 16px 38px rgba(15,23,42,0.18);
+    }
+    .rel-hero h2 {
+        color: #ffffff !important;
+        margin: 0 0 6px 0;
+        font-size: 30px;
+        font-weight: 850;
+        letter-spacing: -0.02em;
+    }
+    .rel-hero p {
+        color: rgba(255,255,255,0.82) !important;
+        margin: 0;
+        font-size: 15px;
+        line-height: 1.45;
+    }
+    .rel-step-card {
+        background: #ffffff;
+        color: #0f172a;
+        border: 1px solid #e5e7eb;
+        border-radius: 18px;
+        padding: 16px 18px;
+        box-shadow: 0 8px 24px rgba(15,23,42,0.08);
+        min-height: 120px;
+    }
+    .rel-step-card .num {
+        background: #dcfce7;
+        color: #166534;
+        border-radius: 999px;
+        width: 32px;
+        height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 850;
+        margin-bottom: 10px;
+    }
+    .rel-step-card strong {
+        display: block;
+        font-size: 15px;
+        margin-bottom: 5px;
+        color: #111827;
+    }
+    .rel-step-card span {
+        color: #64748b;
+        font-size: 13px;
+        line-height: 1.35;
+    }
+    .rel-section-title {
+        font-size: 20px;
+        font-weight: 800;
+        color: #0f172a;
+        margin: 18px 0 8px 0;
+    }
+    div[data-testid="stMetric"] {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        padding: 16px 18px;
+        border-radius: 18px;
+        box-shadow: 0 8px 24px rgba(15,23,42,0.07);
+    }
+    div[data-testid="stMetric"] label, div[data-testid="stMetric"] div {
+        color: #0f172a !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown(
+        """
+        <div class="rel-hero">
+            <h2>📲 Relatórios WhatsApp</h2>
+            <p>Gere o report da Única, copie o texto completo e abra o WhatsApp no contato cadastrado. O envio não depende mais do limite de caracteres do link.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="rel-section-title">1. Escolha a data do report</div>', unsafe_allow_html=True)
     data_ref = st.date_input(
         "Data do relatório",
         value=max_data,
@@ -632,23 +722,121 @@ def render_relatorios_unica(df_base: pd.DataFrame, min_data, max_data):
     )
 
     texto = montar_report_unica(df_base, data_ref)
-    url = f"https://wa.me/{WHATSAPP_REPORT_UNICA}?text={urllib.parse.quote(texto)}"
+    whatsapp_url = f"https://wa.me/{WHATSAPP_REPORT_UNICA}"
 
-    c1, c2, c3 = st.columns(3)
     df_dia = df_base[df_base["DIA"] == data_ref].copy()
     df_mes = df_base[(df_base["ANO"] == data_ref.year) & (df_base["MES_NUM"] == data_ref.month) & (df_base["DIA"] <= data_ref)].copy()
+    venda_dia = float(df_dia["VR_TOTAL"].sum()) if not df_dia.empty else 0.0
+    venda_mes = float(df_mes["VR_TOTAL"].sum()) if not df_mes.empty else 0.0
+    mes_key = month_key_from_monthnum(data_ref.month)
+    prev_mes, _, _ = _previsao_fechamento_mes(df_mes, mes_key)
+
+    st.markdown('<div class="rel-section-title">2. Resumo do relatório</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
     with c1:
-        st.metric("Venda do dia", format_brl(float(df_dia["VR_TOTAL"].sum()) if not df_dia.empty else 0.0))
+        st.metric("Venda do dia", format_brl(venda_dia))
     with c2:
-        st.metric("Venda do mês vigente", format_brl(float(df_mes["VR_TOTAL"].sum()) if not df_mes.empty else 0.0))
+        st.metric("Venda do mês vigente", format_brl(venda_mes))
     with c3:
-        mes_key = month_key_from_monthnum(data_ref.month)
-        prev_mes, _, _ = _previsao_fechamento_mes(df_mes, mes_key)
         st.metric("Previsão fechamento mês", format_brl(prev_mes))
 
-    st.link_button("Abrir WhatsApp com texto pronto", url, use_container_width=True)
+    st.markdown('<div class="rel-section-title">3. Envio</div>', unsafe_allow_html=True)
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        st.markdown(
+            '<div class="rel-step-card"><div class="num">1</div><strong>Clique no botão verde</strong><span>O relatório completo será copiado para a área de transferência.</span></div>',
+            unsafe_allow_html=True,
+        )
+    with s2:
+        st.markdown(
+            '<div class="rel-step-card"><div class="num">2</div><strong>WhatsApp será aberto</strong><span>O app abre direto no número configurado da Única.</span></div>',
+            unsafe_allow_html=True,
+        )
+    with s3:
+        st.markdown(
+            '<div class="rel-step-card"><div class="num">3</div><strong>Cole e envie</strong><span>No campo da conversa, pressione Ctrl+V ou toque em colar.</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    texto_json = json.dumps(texto, ensure_ascii=False)
+    url_json = json.dumps(whatsapp_url, ensure_ascii=False)
+    components.html(
+        f"""
+        <div style="font-family: Arial, sans-serif; margin: 12px 0 2px 0;">
+            <button id="btnZap" style="
+                width: 100%;
+                min-height: 68px;
+                border: 0;
+                border-radius: 18px;
+                cursor: pointer;
+                background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+                color: white;
+                font-size: 22px;
+                font-weight: 900;
+                letter-spacing: -0.01em;
+                box-shadow: 0 14px 30px rgba(18,140,126,0.30);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 12px;
+                transition: transform .15s ease, filter .15s ease;
+            " onmouseover="this.style.transform='translateY(-1px)'; this.style.filter='brightness(1.03)'" onmouseout="this.style.transform='translateY(0)'; this.style.filter='brightness(1)'">
+                <span style="font-size: 28px; line-height: 1;">🟢</span>
+                <span>Enviar pelo WhatsApp</span>
+            </button>
+            <div id="zapStatus" style="
+                margin-top: 10px;
+                font-size: 13px;
+                color: #334155;
+                text-align: center;
+            ">Ao clicar, o texto completo será copiado e o WhatsApp será aberto.</div>
+            <textarea id="fallbackText" style="position:absolute; left:-9999px; top:-9999px;"></textarea>
+        </div>
+        <script>
+        const reportText = {texto_json};
+        const whatsappUrl = {url_json};
+        const btn = document.getElementById('btnZap');
+        const statusEl = document.getElementById('zapStatus');
+        const fallback = document.getElementById('fallbackText');
+
+        async function copyText(text) {{
+            if (navigator.clipboard && window.isSecureContext) {{
+                await navigator.clipboard.writeText(text);
+                return true;
+            }}
+            fallback.value = text;
+            fallback.focus();
+            fallback.select();
+            return document.execCommand('copy');
+        }}
+
+        btn.addEventListener('click', async () => {{
+            try {{
+                await copyText(reportText);
+                statusEl.innerHTML = '✅ Relatório copiado. Abrindo WhatsApp... cole a mensagem na conversa.';
+                statusEl.style.color = '#166534';
+                window.open(whatsappUrl, '_blank');
+            }} catch (err) {{
+                fallback.value = reportText;
+                fallback.style.position = 'static';
+                fallback.style.left = 'auto';
+                fallback.style.top = 'auto';
+                fallback.style.width = '100%';
+                fallback.style.height = '180px';
+                fallback.style.marginTop = '12px';
+                fallback.select();
+                statusEl.innerHTML = '⚠️ Não foi possível copiar automaticamente. Selecione o texto abaixo, copie manualmente e abra o WhatsApp.';
+                statusEl.style.color = '#b45309';
+                window.open(whatsappUrl, '_blank');
+            }}
+        }});
+        </script>
+        """,
+        height=120,
+    )
+
     st.download_button(
-        "Baixar texto .txt",
+        "⬇️ Baixar texto .txt",
         data=texto.encode("utf-8"),
         file_name=f"report_unica_{data_ref.strftime('%Y_%m_%d')}.txt",
         mime="text/plain",
@@ -656,7 +844,8 @@ def render_relatorios_unica(df_base: pd.DataFrame, min_data, max_data):
     )
 
     st.markdown("### Texto gerado")
-    st.text_area("Copie ou revise antes de enviar", value=texto, height=620)
+    st.caption(f"Tamanho do texto: {len(texto):,} caracteres. O botão verde copia o texto inteiro, sem enviar pela URL do WhatsApp.".replace(",", "."))
+    st.text_area("Revise o texto antes de enviar", value=texto, height=620)
 # =========================
 # Sidebar filtros
 # =========================
