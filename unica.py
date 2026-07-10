@@ -407,17 +407,40 @@ def dashboard_to_pdf_bytes(sections: list[dict], titulo: str = "Dashboard Comple
 
 
 def botao_download_pdf(df_in: pd.DataFrame, titulo: str, nome_arquivo: str, subtitulo: str = "", max_rows: int | None = None):
-    try:
-        pdf_bytes = dataframe_to_pdf_bytes(df_in, titulo=titulo, subtitulo=subtitulo, max_rows=max_rows)
+    """Gera o PDF somente quando solicitado.
+
+    Antes, todos os PDFs eram recriados em cada rerun do Streamlit, inclusive ao
+    alterar um filtro. Em bases grandes isso causava picos de memória e queda do app.
+    """
+    safe_key = re.sub(r"[^a-zA-Z0-9_]+", "_", nome_arquivo).strip("_")
+    state_key = f"pdf_pronto_{safe_key}"
+    signature_key = f"pdf_assinatura_{safe_key}"
+    assinatura = (len(df_in), tuple(map(str, df_in.columns)), titulo, subtitulo, max_rows)
+
+    # Descarta um PDF antigo quando o recorte/tabela mudou.
+    if st.session_state.get(signature_key) != assinatura:
+        st.session_state.pop(state_key, None)
+        st.session_state[signature_key] = assinatura
+
+    if state_key not in st.session_state:
+        if st.button(f"Preparar PDF - {titulo}", key=f"btn_{safe_key}", use_container_width=False):
+            try:
+                with st.spinner(f"Gerando PDF: {titulo}..."):
+                    st.session_state[state_key] = dataframe_to_pdf_bytes(
+                        df_in, titulo=titulo, subtitulo=subtitulo, max_rows=max_rows
+                    )
+            except Exception as e:
+                st.warning(str(e))
+
+    if state_key in st.session_state:
         st.download_button(
             label=f"Baixar PDF - {titulo}",
-            data=pdf_bytes,
+            data=st.session_state[state_key],
             file_name=nome_arquivo,
             mime="application/pdf",
             use_container_width=False,
+            key=f"download_{safe_key}",
         )
-    except Exception as e:
-        st.warning(str(e))
 
 
 def add_pdf_section(title: str, df_sec: pd.DataFrame, max_rows: int | None = None):
@@ -854,59 +877,76 @@ max_dt = df["DATA"].max().date()
 if "vendedor_sel" not in st.session_state:
     st.session_state["vendedor_sel"] = "TODOS"
 with st.sidebar:
-    pagina_app = st.radio("Página", ["Dashboard", "Relatórios"], index=0)
     st.header("Filtros")
+    st.caption("Escolha os filtros e clique em Aplicar. Isso evita recálculos a cada clique.")
 
-    filtro_tipo = st.radio("Tipo de filtro", ["Período (DATA)", "Mês (ANO/MÊS)"], index=0)
-
-    if filtro_tipo == "Período (DATA)":
-        dt_ini, dt_fim = st.date_input(
-            "Período (DATA)",
-            value=(min_dt, max_dt),
-            min_value=min_dt,
-            max_value=max_dt,
+    with st.form("form_filtros_unica", clear_on_submit=False):
+        pagina_app = st.radio("Página", ["Dashboard", "Relatórios"], index=0, key="pagina_app")
+        filtro_tipo = st.radio(
+            "Tipo de filtro", ["Período (DATA)", "Mês (ANO/MÊS)"], index=0, key="filtro_tipo"
         )
-        if isinstance(dt_ini, (tuple, list)):
-            dt_ini, dt_fim = dt_ini[0], dt_ini[1]
-        mask_base = (df["DIA"] >= dt_ini) & (df["DIA"] <= dt_fim)
-    else:
-        anos_opts = sorted(df["ANO"].dropna().unique().tolist())
-        ano_padrao = max(anos_opts) if anos_opts else int(df["ANO"].max())
-        ano_sel = st.selectbox("Ano", options=anos_opts, index=(anos_opts.index(ano_padrao) if ano_padrao in anos_opts else 0))
-        meses_sel = st.multiselect("Mês(es)", options=MESES_PT, default=MESES_PT)
-        if not meses_sel:
-            meses_sel = MESES_PT
-        mask_base = (df["ANO"] == int(ano_sel)) & (df["MES"].isin(meses_sel))
 
-        df_tmp = df.loc[mask_base]
-        if df_tmp.empty:
-            dt_ini, dt_fim = min_dt, max_dt
+        if filtro_tipo == "Período (DATA)":
+            periodo_val = st.date_input(
+                "Período (DATA)",
+                value=(min_dt, max_dt),
+                min_value=min_dt,
+                max_value=max_dt,
+                key="periodo_data",
+            )
+            if isinstance(periodo_val, (tuple, list)):
+                if len(periodo_val) >= 2:
+                    dt_ini, dt_fim = periodo_val[0], periodo_val[1]
+                elif len(periodo_val) == 1:
+                    dt_ini = dt_fim = periodo_val[0]
+                else:
+                    dt_ini, dt_fim = min_dt, max_dt
+            else:
+                dt_ini = dt_fim = periodo_val
+            mask_base = (df["DIA"] >= dt_ini) & (df["DIA"] <= dt_fim)
         else:
-            dt_ini = df_tmp["DIA"].min()
-            dt_fim = df_tmp["DIA"].max()
+            anos_opts = sorted(df["ANO"].dropna().unique().tolist())
+            ano_padrao = max(anos_opts) if anos_opts else int(df["ANO"].max())
+            ano_sel = st.selectbox(
+                "Ano", options=anos_opts,
+                index=(anos_opts.index(ano_padrao) if ano_padrao in anos_opts else 0),
+                key="ano_sel",
+            )
+            meses_sel = st.multiselect(
+                "Mês(es)", options=MESES_PT, default=MESES_PT, key="meses_sel"
+            )
+            meses_aplicados = meses_sel or MESES_PT
+            mask_base = (df["ANO"] == int(ano_sel)) & (df["MES"].isin(meses_aplicados))
 
-    # manter seleção de vendedor
-    if "vendedor_sel" not in st.session_state:
-        st.session_state["vendedor_sel"] = "TODOS"
+            df_tmp = df.loc[mask_base]
+            if df_tmp.empty:
+                dt_ini, dt_fim = min_dt, max_dt
+            else:
+                dt_ini = df_tmp["DIA"].min()
+                dt_fim = df_tmp["DIA"].max()
 
-    vendedor_sel = "TODOS"
-    if "VENDEDOR" in df.columns:
-        df_dt = df.loc[mask_base].copy()
-        vend_opts = (
-            df_dt["VENDEDOR"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().unique().tolist()
-            if not df_dt.empty
-            else df["VENDEDOR"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().unique().tolist()
-        )
-        vend_opts = sorted(set(vend_opts), key=lambda x: x.upper())
-        vend_opts = ["TODOS"] + vend_opts
-        cur = st.session_state.get("vendedor_sel", "TODOS")
-        if cur not in vend_opts:
-            cur = "TODOS"
-            st.session_state["vendedor_sel"] = cur
-        vendedor_sel = st.selectbox("Selecionar vendedor", options=vend_opts, index=vend_opts.index(cur))
-        st.session_state["vendedor_sel"] = vendedor_sel
-    else:
-        st.info("Coluna VENDEDOR não encontrada (filtro por vendedor indisponível).")
+        vendedor_sel = "TODOS"
+        if "VENDEDOR" in df.columns:
+            df_dt = df.loc[mask_base]
+            origem_vend = df_dt if not df_dt.empty else df
+            vend_opts = (
+                origem_vend["VENDEDOR"].fillna("").astype(str).map(norm_text)
+                .replace("", pd.NA).dropna().unique().tolist()
+            )
+            vend_opts = ["TODOS"] + sorted(set(vend_opts), key=lambda x: x.upper())
+            cur = st.session_state.get("vendedor_sel", "TODOS")
+            if cur not in vend_opts:
+                cur = "TODOS"
+            vendedor_sel = st.selectbox(
+                "Selecionar vendedor", options=vend_opts,
+                index=vend_opts.index(cur), key="vendedor_sel_widget"
+            )
+        else:
+            st.info("Coluna VENDEDOR não encontrada (filtro por vendedor indisponível).")
+
+        aplicar_filtros = st.form_submit_button("Aplicar filtros", use_container_width=True)
+
+    st.session_state["vendedor_sel"] = vendedor_sel
 
 # =========================
 # Dataframes filtrados
@@ -3143,18 +3183,34 @@ with st.container():
 st.divider()
 st.markdown("## Exportar Dashboard Completo")
 st.caption("O PDF completo consolida os indicadores, tabelas principais e os drills/tabelas atualmente selecionados no dashboard.")
-try:
-    pdf_dash = dashboard_to_pdf_bytes(
-        st.session_state.get("pdf_sections", []),
-        titulo="Dashboard Completo - Única",
-        subtitulo=f"Período: {dt_ini} a {dt_fim} | Vendedor: {vendedor_sel} | Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-    )
+pdf_dash_key = "pdf_dashboard_completo_pronto"
+pdf_dash_sig_key = "pdf_dashboard_completo_assinatura"
+pdf_dash_signature = (str(dt_ini), str(dt_fim), vendedor_sel, len(df_periodo))
+if st.session_state.get(pdf_dash_sig_key) != pdf_dash_signature:
+    st.session_state.pop(pdf_dash_key, None)
+    st.session_state[pdf_dash_sig_key] = pdf_dash_signature
+
+if pdf_dash_key not in st.session_state:
+    if st.button("Preparar PDF - Dashboard Completo", key="preparar_pdf_dashboard_completo"):
+        try:
+            with st.spinner("Gerando o PDF completo..."):
+                st.session_state[pdf_dash_key] = dashboard_to_pdf_bytes(
+                    st.session_state.get("pdf_sections", []),
+                    titulo="Dashboard Completo - Única",
+                    subtitulo=(
+                        f"Período: {dt_ini} a {dt_fim} | Vendedor: {vendedor_sel} | "
+                        f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                    ),
+                )
+        except Exception as e:
+            st.warning(str(e))
+
+if pdf_dash_key in st.session_state:
     st.download_button(
         label="Baixar PDF - Dashboard Completo",
-        data=pdf_dash,
+        data=st.session_state[pdf_dash_key],
         file_name="dashboard_completo_unica.pdf",
         mime="application/pdf",
         use_container_width=False,
+        key="download_pdf_dashboard_completo",
     )
-except Exception as e:
-    st.warning(str(e))
