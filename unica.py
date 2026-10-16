@@ -1481,7 +1481,7 @@ with abas_bi[3]:
                 uf_ranking[["UF", "ESTADO", "FATURAMENTO", "PARTICIPAÇÃO (%)"]].style.format({
                     "FATURAMENTO": format_brl,
                     "PARTICIPAÇÃO (%)": lambda v: fmt_pct(v)
-                }).background_gradient(subset=["FATURAMENTO"], cmap="Reds"),
+                }).bar(subset=["FATURAMENTO"], color="#E11D2E", align="left"),
                 use_container_width=True, hide_index=True
             )
             st.markdown("### Seleção de Região (para listar clientes)")
