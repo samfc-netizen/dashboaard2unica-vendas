@@ -82,6 +82,21 @@ div.stDownloadButton > button p {
 </style>
 """, unsafe_allow_html=True)
 
+
+st.markdown("""<style>
+:root {--bi-ink:#17263b;--bi-blue:#1765ba;--bi-line:#dfe7f1}
+.block-container {max-width:1560px;padding-top:1.2rem;padding-bottom:3rem}
+.bi-hero {background:linear-gradient(110deg,#102d4f,#1765ba);padding:26px 30px;border-radius:18px;color:white;margin-bottom:14px;box-shadow:0 12px 26px rgba(16,45,79,.12)}
+.bi-hero h1{color:#fff!important;font-size:2rem;margin:.15rem 0!important;letter-spacing:-.03em}
+.bi-hero p{color:#d9e9fb!important;margin:0}.bi-eyebrow{font-size:.7rem;font-weight:800;letter-spacing:.16em;color:#bcd8ff}
+div[data-testid="stMetric"]{background:var(--secondary-background-color);border:1px solid var(--bi-line);border-radius:14px;padding:14px;box-shadow:0 4px 16px rgba(18,43,77,.04)}
+div[data-testid="stDataFrame"]{border:1px solid var(--bi-line);border-radius:12px;overflow:hidden}
+h2,h3{letter-spacing:-.025em}h2{border-bottom:1px solid var(--bi-line);padding-bottom:.45rem}
+section[data-testid="stSidebar"]{border-right:1px solid var(--bi-line)}
+section[data-testid="stSidebar"] div[data-testid="stForm"]{border:0;padding:0}
+@media(max-width:700px){.block-container{padding:1rem .7rem}.bi-hero{padding:20px 16px}.bi-hero h1{font-size:1.55rem}}
+</style>""",unsafe_allow_html=True)
+
 ARQUIVO_EXCEL = "base unica.xlsx"
 MESES_PT = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
 MES_NUM_TO_PT = {i + 1: m for i, m in enumerate(MESES_PT)}
@@ -870,98 +885,87 @@ def render_relatorios_unica(df_base: pd.DataFrame, min_data, max_data):
     st.caption(f"Tamanho do texto: {len(texto):,} caracteres. O botão verde copia o texto inteiro, sem enviar pela URL do WhatsApp.".replace(",", "."))
     st.text_area("Revise o texto antes de enviar", value=texto, height=620)
 # =========================
-# Sidebar filtros
+# Filtros BI — seleção transacional e dimensões combináveis
 # =========================
+from datetime import timedelta
 min_dt = df["DATA"].min().date()
 max_dt = df["DATA"].max().date()
-if "vendedor_sel" not in st.session_state:
-    st.session_state["vendedor_sel"] = "TODOS"
+DIMENSOES_BI = {"VENDEDOR": "Vendedores", "SEGMENTO": "Segmentos", "MARCA": "Marcas", "CLIENTE": "Clientes", "LINHA": "Linhas", "CIDADE": "Cidades", "BAIRRO": "Bairros"}
+
+def _dim_opcoes(base, coluna):
+    if coluna not in base.columns:
+        return []
+    return sorted(set(base[coluna].dropna().astype(str).map(norm_text)) - {"", "nan", "None"}, key=str.casefold)
+
+if "bi_aplicado" not in st.session_state:
+    st.session_state["bi_aplicado"] = {"pagina": "Dashboard", "modo": "Período", "inicio": min_dt, "fim": max_dt, "ano": int(df["ANO"].max()), "meses": MESES_PT.copy(), "dims": {}}
+
 with st.sidebar:
-    st.header("Filtros")
-    st.caption("Escolha os filtros e clique em Aplicar. Isso evita recálculos a cada clique.")
+    st.markdown("### ◈ ÚNICA | BI")
+    st.caption("Central de filtros · selecione e aplique em conjunto")
+    if st.button("↺ Limpar todos os filtros", use_container_width=True, key="bi_reset"):
+        st.session_state["bi_aplicado"] = {"pagina": "Dashboard", "modo": "Período", "inicio": min_dt, "fim": max_dt, "ano": int(df["ANO"].max()), "meses": MESES_PT.copy(), "dims": {}}
+        for chave in list(st.session_state):
+            if chave.startswith("bi_widget_"):
+                del st.session_state[chave]
+        st.rerun()
 
-    with st.form("form_filtros_unica", clear_on_submit=False):
-        pagina_app = st.radio("Página", ["Dashboard", "Relatórios"], index=0, key="pagina_app")
-        filtro_tipo = st.radio(
-            "Tipo de filtro", ["Período (DATA)", "Mês (ANO/MÊS)"], index=0, key="filtro_tipo"
-        )
-
-        if filtro_tipo == "Período (DATA)":
-            periodo_val = st.date_input(
-                "Período (DATA)",
-                value=(min_dt, max_dt),
-                min_value=min_dt,
-                max_value=max_dt,
-                key="periodo_data",
-            )
-            if isinstance(periodo_val, (tuple, list)):
-                if len(periodo_val) >= 2:
-                    dt_ini, dt_fim = periodo_val[0], periodo_val[1]
-                elif len(periodo_val) == 1:
-                    dt_ini = dt_fim = periodo_val[0]
-                else:
-                    dt_ini, dt_fim = min_dt, max_dt
-            else:
-                dt_ini = dt_fim = periodo_val
-            mask_base = (df["DIA"] >= dt_ini) & (df["DIA"] <= dt_fim)
+    ativo = st.session_state["bi_aplicado"]
+    with st.form("form_filtros_unica"):
+        pagina_app_form = st.radio("Área", ["Dashboard", "Relatórios"], index=0 if ativo["pagina"] == "Dashboard" else 1, horizontal=True)
+        modo = st.radio("Visualização temporal", ["Período", "Ano / meses"], index=0 if ativo["modo"] == "Período" else 1, horizontal=True)
+        if modo == "Período":
+            intervalo = st.date_input("Intervalo de datas", value=(max(min_dt, ativo["inicio"]), min(max_dt, ativo["fim"])), min_value=min_dt, max_value=max_dt)
+            inicio, fim = (intervalo[0], intervalo[-1]) if isinstance(intervalo, (tuple,list)) and intervalo else (min_dt, max_dt)
+            ano = ativo["ano"]
+            meses = ativo["meses"]
         else:
-            anos_opts = sorted(df["ANO"].dropna().unique().tolist())
-            ano_padrao = max(anos_opts) if anos_opts else int(df["ANO"].max())
-            ano_sel = st.selectbox(
-                "Ano", options=anos_opts,
-                index=(anos_opts.index(ano_padrao) if ano_padrao in anos_opts else 0),
-                key="ano_sel",
-            )
-            meses_sel = st.multiselect(
-                "Mês(es)", options=MESES_PT, default=MESES_PT, key="meses_sel"
-            )
-            meses_aplicados = meses_sel or MESES_PT
-            mask_base = (df["ANO"] == int(ano_sel)) & (df["MES"].isin(meses_aplicados))
+            anos = sorted(df["ANO"].unique().tolist(), reverse=True)
+            ano = st.selectbox("Ano", anos, index=anos.index(ativo["ano"]) if ativo["ano"] in anos else 0)
+            meses = st.multiselect("Meses", MESES_PT, default=[m for m in ativo["meses"] if m in MESES_PT])
+            inicio, fim = min_dt, max_dt
+        st.markdown("**Dimensões de análise**")
+        st.caption("Selecione vários itens por campo. Campos diferentes se cruzam.")
+        dims = {}
+        for coluna, rotulo in DIMENSOES_BI.items():
+            if coluna not in df.columns:
+                continue
+            opcoes = _dim_opcoes(df, coluna)
+            anteriores = ativo["dims"].get(coluna, [])
+            dims[coluna] = st.multiselect(rotulo, opcoes, default=[x for x in anteriores if x in opcoes], placeholder=f"Todos os {rotulo.lower()}", key=f"bi_widget_{coluna}")
+        aplicar = st.form_submit_button("✓ Aplicar filtros", use_container_width=True, type="primary")
+    if aplicar:
+        st.session_state["bi_aplicado"] = {"pagina": pagina_app_form, "modo": modo, "inicio": inicio, "fim": fim, "ano": ano, "meses": meses, "dims": dims}
 
-            df_tmp = df.loc[mask_base]
-            if df_tmp.empty:
-                dt_ini, dt_fim = min_dt, max_dt
-            else:
-                dt_ini = df_tmp["DIA"].min()
-                dt_fim = df_tmp["DIA"].max()
-
-        vendedor_sel = "TODOS"
-        if "VENDEDOR" in df.columns:
-            df_dt = df.loc[mask_base]
-            origem_vend = df_dt if not df_dt.empty else df
-            vend_opts = (
-                origem_vend["VENDEDOR"].fillna("").astype(str).map(norm_text)
-                .replace("", pd.NA).dropna().unique().tolist()
-            )
-            vend_opts = ["TODOS"] + sorted(set(vend_opts), key=lambda x: x.upper())
-            cur = st.session_state.get("vendedor_sel", "TODOS")
-            if cur not in vend_opts:
-                cur = "TODOS"
-            vendedor_sel = st.selectbox(
-                "Selecionar vendedor", options=vend_opts,
-                index=vend_opts.index(cur), key="vendedor_sel_widget"
-            )
-        else:
-            st.info("Coluna VENDEDOR não encontrada (filtro por vendedor indisponível).")
-
-        aplicar_filtros = st.form_submit_button("Aplicar filtros", use_container_width=True)
-
-    st.session_state["vendedor_sel"] = vendedor_sel
-
-# =========================
-# Dataframes filtrados
-# =========================
-mask_dt = mask_base
-df_periodo_all = df.loc[mask_dt].copy()
-if df_periodo_all.empty:
-    st.warning("Nenhum dado encontrado no período selecionado.")
-    st.stop()
-if vendedor_sel != "TODOS" and "VENDEDOR" in df_periodo_all.columns:
-    df_periodo = df_periodo_all[
-        df_periodo_all["VENDEDOR"].fillna("").astype(str).map(norm_text) == norm_text(vendedor_sel)
-    ].copy()
+ativo = st.session_state["bi_aplicado"]
+pagina_app = ativo["pagina"]
+if ativo["modo"] == "Período":
+    dt_ini, dt_fim = ativo["inicio"], ativo["fim"]
+    mask_base = (df["DIA"] >= dt_ini) & (df["DIA"] <= dt_fim)
 else:
-    df_periodo = df_periodo_all.copy()
+    mask_base = (df["ANO"] == ativo["ano"]) & df["MES"].isin(ativo["meses"])
+    tmp = df.loc[mask_base]
+    dt_ini, dt_fim = (tmp["DIA"].min(), tmp["DIA"].max()) if not tmp.empty else (min_dt, max_dt)
+
+mask_dt = mask_base
+# df_periodo_all mantém a base temporal para análises comparativas de vendedores.
+df_periodo_all = df.loc[mask_dt].copy()
+for coluna, valores in ativo["dims"].items():
+    if valores and coluna in df_periodo_all.columns and coluna != "VENDEDOR":
+        df_periodo_all = df_periodo_all[df_periodo_all[coluna].fillna("").astype(str).map(norm_text).isin(valores)]
+
+vendedores_escolhidos = ativo["dims"].get("VENDEDOR", [])
+vendedor_sel = vendedores_escolhidos[0] if len(vendedores_escolhidos) == 1 else "TODOS"
+df_periodo = df_periodo_all.copy()
+if vendedores_escolhidos and "VENDEDOR" in df_periodo.columns:
+    df_periodo = df_periodo[df_periodo["VENDEDOR"].fillna("").astype(str).map(norm_text).isin(vendedores_escolhidos)].copy()
+
+st.markdown("""<div class="bi-hero"><div class="bi-eyebrow">INTELIGÊNCIA COMERCIAL • ÚNICA ATACADISTA</div><h1>Visão de Negócios</h1><p>Indicadores, desempenho e oportunidades em uma única visão.</p></div>""", unsafe_allow_html=True)
+selecoes = [f"{DIMENSOES_BI[c]}: {len(v)}" for c,v in ativo["dims"].items() if v]
+st.caption(f"Período: {dt_ini:%d/%m/%Y} a {dt_fim:%d/%m/%Y}  |  " + (" • ".join(selecoes) if selecoes else "Todas as dimensões"))
+if df_periodo.empty:
+    st.warning("Nenhum registro corresponde aos filtros. Altere as seleções ou limpe os filtros na lateral.")
+    st.stop()
 
 if pagina_app == "Relatórios":
     render_relatorios_unica(df, min_dt, max_dt)
@@ -971,8 +975,9 @@ st.session_state["pdf_sections"] = []
 
 # Base completa do ano (para tabelas Ano-1 e Metas), sem zerar meses fora do filtro de período/mês
 df_base_vendor = df.copy()
-if vendedor_sel != "TODOS" and "VENDEDOR" in df_base_vendor.columns:
-    df_base_vendor = df_base_vendor[df_base_vendor["VENDEDOR"].fillna("").astype(str).map(norm_text) == norm_text(vendedor_sel)].copy()
+for coluna, valores in ativo["dims"].items():
+    if valores and coluna in df_base_vendor.columns:
+        df_base_vendor = df_base_vendor[df_base_vendor[coluna].fillna("").astype(str).map(norm_text).isin(valores)].copy()
 
 ano_atual = int(df_periodo_all["ANO"].max())
 palette = (
@@ -1367,8 +1372,8 @@ has_cliente = "CLIENTE" in df_periodo_all.columns
 if has_city and has_bairro and has_cliente:
     # Base do mapa: período SEMPRE.
     reg = df_periodo_all.copy()
-    if vendedor_sel != "TODOS" and "VENDEDOR" in reg.columns:
-        reg = reg[reg["VENDEDOR"].fillna("").astype(str).map(norm_text) == norm_text(vendedor_sel)].copy()
+    if vendedores_escolhidos and "VENDEDOR" in reg.columns:
+        reg = reg[reg["VENDEDOR"].fillna("").astype(str).map(norm_text).isin(vendedores_escolhidos)].copy()
     # >>> CORREÇÃO PRINCIPAL DO "BRANCO EM TODOS":
     # Plotly Sunburst/Treemap não lida bem com valores negativos.
     # Quando está em TODOS, entram devoluções/ajustes e pode ficar "em branco".
