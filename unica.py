@@ -1408,15 +1408,82 @@ with abas_bi[3]:
             )
             reg_tbl_plot = compress_region_table(reg_tbl, top_n=500)
             st.subheader("Mapa de Regiões e Faturamento (UF → Cidade → Bairro)")
-            # Sunburst (e fallback automático pra Treemap se der problema)
+            # Mapa coroplético real das unidades federativas brasileiras.
+            # A fonte cartográfica é pública; o arquivo é mantido em cache no Streamlit.
+            @st.cache_data(show_spinner=False, ttl=86400)
+            def _geojson_ufs_brasil():
+                import json as _json
+                from urllib.request import Request, urlopen
+                url = "https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/brazil-states.geojson"
+                req = Request(url, headers={"User-Agent": "Mozilla/5.0 (Streamlit BI)"})
+                with urlopen(req, timeout=12) as resp:
+                    return _json.load(resp)
+
+            _uf_nomes = {
+                "AC":"Acre", "AL":"Alagoas", "AP":"Amapá", "AM":"Amazonas",
+                "BA":"Bahia", "CE":"Ceará", "DF":"Distrito Federal", "ES":"Espírito Santo",
+                "GO":"Goiás", "MA":"Maranhão", "MT":"Mato Grosso", "MS":"Mato Grosso do Sul",
+                "MG":"Minas Gerais", "PA":"Pará", "PB":"Paraíba", "PR":"Paraná",
+                "PE":"Pernambuco", "PI":"Piauí", "RJ":"Rio de Janeiro", "RN":"Rio Grande do Norte",
+                "RS":"Rio Grande do Sul", "RO":"Rondônia", "RR":"Roraima",
+                "SC":"Santa Catarina", "SP":"São Paulo", "SE":"Sergipe", "TO":"Tocantins"
+            }
+            uf_fat = reg.groupby("UF", as_index=False)["VR_TOTAL"].sum()
+            uf_fat = uf_fat[uf_fat["UF"].isin(_uf_nomes)].copy()
+            total_ufs = float(uf_fat["VR_TOTAL"].sum())
+            uf_fat["PARTICIPACAO"] = (uf_fat["VR_TOTAL"] / total_ufs * 100) if total_ufs else 0.0
+            uf_fat["ESTADO"] = uf_fat["UF"].map(_uf_nomes)
+            st.caption("Passe o mouse sobre cada estado para consultar o faturamento. Os filtros de drill continuam abaixo.")
             try:
-                fig_reg = px.sunburst(reg_tbl_plot, path=["UF", "CIDADE_LIMPA", "BAIRRO"], values="FAT (R$)")
+                geojson_br = _geojson_ufs_brasil()
+                # Padroniza as chaves dos estados do arquivo geográfico para siglas UF.
+                _nome_para_uf = {normalize_col(nome): uf for uf, nome in _uf_nomes.items()}
+                _nome_para_uf.update({normalize_col(uf): uf for uf in _uf_nomes})
+                for feature in geojson_br.get("features", []):
+                    props = feature.setdefault("properties", {})
+                    identificador = next((props.get(k) for k in ("name", "NAME", "nome", "sigla", "UF") if props.get(k)), "")
+                    props["UF_BI"] = _nome_para_uf.get(normalize_col(identificador), "")
+                # Inclui todos os estados para que os sem faturamento apareçam no mapa.
+                mapa_ufs = pd.DataFrame({"UF": list(_uf_nomes)})
+                mapa_ufs = mapa_ufs.merge(uf_fat[["UF", "VR_TOTAL", "PARTICIPACAO"]], on="UF", how="left")
+                mapa_ufs["VR_TOTAL"] = mapa_ufs["VR_TOTAL"].fillna(0.0)
+                mapa_ufs["PARTICIPACAO"] = mapa_ufs["PARTICIPACAO"].fillna(0.0)
+                mapa_ufs["ESTADO"] = mapa_ufs["UF"].map(_uf_nomes)
+                fig_reg = px.choropleth(
+                    mapa_ufs, geojson=geojson_br, locations="UF",
+                    featureidkey="properties.UF_BI", color="VR_TOTAL",
+                    color_continuous_scale=[[0,"#FDE8E8"],[0.25,"#F6A3A3"],[0.55,"#E84848"],[1,"#9F101B"]],
+                    hover_name="ESTADO", custom_data=["UF", "PARTICIPACAO"],
+                    labels={"VR_TOTAL":"Faturamento (R$)"}
+                )
+                fig_reg.update_traces(
+                    marker_line_color="#FFFFFF", marker_line_width=0.85,
+                    hovertemplate="<b>%{hovertext} (%{customdata[0]})</b><br>Faturamento: R$ %{z:,.2f}<br>Participação: %{customdata[1]:.1f}%<extra></extra>"
+                )
+                fig_reg.update_geos(fitbounds="locations", visible=False, bgcolor="rgba(0,0,0,0)")
+                fig_reg.update_layout(
+                    height=600, margin=dict(l=0,r=0,t=8,b=0),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    coloraxis_colorbar=dict(title="R$", thickness=14, len=0.7)
+                )
+                st.plotly_chart(fig_reg, use_container_width=True, key="mapa_brasil_ufs_unica")
+            except Exception as erro_mapa:
+                st.warning("Não foi possível carregar o contorno geográfico do Brasil. Exibindo a visualização alternativa.")
+                with st.expander("Detalhes do carregamento cartográfico"):
+                    st.caption(str(erro_mapa))
+                fig_reg = px.treemap(reg_tbl_plot, path=["UF", "CIDADE_LIMPA", "BAIRRO"], values="FAT (R$)")
                 fig_reg.update_layout(height=540)
                 st.plotly_chart(fig_reg, use_container_width=True)
-            except Exception:
-                fig_tm = px.treemap(reg_tbl_plot, path=["UF", "CIDADE_LIMPA", "BAIRRO"], values="FAT (R$)")
-                fig_tm.update_layout(height=540)
-                st.plotly_chart(fig_tm, use_container_width=True)
+            st.markdown("#### Faturamento por UF")
+            uf_ranking = uf_fat.sort_values("VR_TOTAL", ascending=False).copy()
+            uf_ranking = uf_ranking.rename(columns={"VR_TOTAL":"FATURAMENTO", "PARTICIPACAO":"PARTICIPAÇÃO (%)"})
+            st.dataframe(
+                uf_ranking[["UF", "ESTADO", "FATURAMENTO", "PARTICIPAÇÃO (%)"]].style.format({
+                    "FATURAMENTO": format_brl,
+                    "PARTICIPAÇÃO (%)": lambda v: fmt_pct(v)
+                }).background_gradient(subset=["FATURAMENTO"], cmap="Reds"),
+                use_container_width=True, hide_index=True
+            )
             st.markdown("### Seleção de Região (para listar clientes)")
             colA, colB, colC = st.columns(3)
             uf_opts = sorted(reg["UF"].dropna().unique().tolist())
