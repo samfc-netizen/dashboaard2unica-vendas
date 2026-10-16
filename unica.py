@@ -893,117 +893,116 @@ def render_relatorios_unica(df_base: pd.DataFrame, min_data, max_data):
     st.text_area("Revise o texto antes de enviar", value=texto, height=620)
 # =========================
 # Filtros BI — seleção transacional e dimensões combináveis
-if pagina_bi == "Visão Geral":
-    # =========================
-    from datetime import timedelta
-    min_dt = df["DATA"].min().date()
-    max_dt = df["DATA"].max().date()
-    DIMENSOES_BI = {"VENDEDOR": "Vendedores", "SEGMENTO": "Segmentos", "MARCA": "Marcas", "CLIENTE": "Clientes", "LINHA": "Linhas", "CIDADE": "Cidades", "BAIRRO": "Bairros"}
+# =========================
+from datetime import timedelta
+min_dt = df["DATA"].min().date()
+max_dt = df["DATA"].max().date()
+DIMENSOES_BI = {"VENDEDOR": "Vendedores", "SEGMENTO": "Segmentos", "MARCA": "Marcas", "CLIENTE": "Clientes", "LINHA": "Linhas", "CIDADE": "Cidades", "BAIRRO": "Bairros"}
 
-    def _dim_opcoes(base, coluna):
-        if coluna not in base.columns:
-            return []
-        return sorted(set(base[coluna].dropna().astype(str).map(norm_text)) - {"", "nan", "None"}, key=str.casefold)
+def _dim_opcoes(base, coluna):
+    if coluna not in base.columns:
+        return []
+    return sorted(set(base[coluna].dropna().astype(str).map(norm_text)) - {"", "nan", "None"}, key=str.casefold)
 
-    if "bi_aplicado" not in st.session_state:
+if "bi_aplicado" not in st.session_state:
+    st.session_state["bi_aplicado"] = {"pagina": "Dashboard", "modo": "Período", "inicio": min_dt, "fim": max_dt, "ano": int(df["ANO"].max()), "meses": MESES_PT.copy(), "dims": {}}
+
+with st.sidebar:
+    st.markdown("### ◈ ÚNICA | BI")
+    st.caption("Central de filtros · selecione e aplique em conjunto")
+    if st.button("↺ Limpar todos os filtros", use_container_width=True, key="bi_reset"):
         st.session_state["bi_aplicado"] = {"pagina": "Dashboard", "modo": "Período", "inicio": min_dt, "fim": max_dt, "ano": int(df["ANO"].max()), "meses": MESES_PT.copy(), "dims": {}}
-
-    with st.sidebar:
-        st.markdown("### ◈ ÚNICA | BI")
-        st.caption("Central de filtros · selecione e aplique em conjunto")
-        if st.button("↺ Limpar todos os filtros", use_container_width=True, key="bi_reset"):
-            st.session_state["bi_aplicado"] = {"pagina": "Dashboard", "modo": "Período", "inicio": min_dt, "fim": max_dt, "ano": int(df["ANO"].max()), "meses": MESES_PT.copy(), "dims": {}}
-            for chave in list(st.session_state):
-                if chave.startswith("bi_widget_"):
-                    del st.session_state[chave]
-            st.rerun()
-
-        ativo = st.session_state["bi_aplicado"]
-        with st.form("form_filtros_unica"):
-            pagina_app_form = "Dashboard"
-            modo = st.radio("Visualização temporal", ["Período", "Ano / meses"], index=0 if ativo["modo"] == "Período" else 1, horizontal=True)
-            if modo == "Período":
-                intervalo = st.date_input("Intervalo de datas", value=(max(min_dt, ativo["inicio"]), min(max_dt, ativo["fim"])), min_value=min_dt, max_value=max_dt)
-                inicio, fim = (intervalo[0], intervalo[-1]) if isinstance(intervalo, (tuple,list)) and intervalo else (min_dt, max_dt)
-                ano = ativo["ano"]
-                meses = ativo["meses"]
-            else:
-                anos = sorted(df["ANO"].unique().tolist(), reverse=True)
-                ano = st.selectbox("Ano", anos, index=anos.index(ativo["ano"]) if ativo["ano"] in anos else 0)
-                meses = st.multiselect("Meses", MESES_PT, default=[m for m in ativo["meses"] if m in MESES_PT])
-                inicio, fim = min_dt, max_dt
-            st.markdown("**Dimensões de análise**")
-            st.caption("Selecione vários itens por campo. Campos diferentes se cruzam.")
-            dims = {}
-            for coluna, rotulo in DIMENSOES_BI.items():
-                if coluna not in df.columns:
-                    continue
-                opcoes = _dim_opcoes(df, coluna)
-                anteriores = ativo["dims"].get(coluna, [])
-                dims[coluna] = st.multiselect(rotulo, opcoes, default=[x for x in anteriores if x in opcoes], placeholder=f"Todos os {rotulo.lower()}", key=f"bi_widget_{coluna}")
-            aplicar = st.form_submit_button("✓ Aplicar filtros", use_container_width=True, type="primary")
-        if aplicar:
-            st.session_state["bi_aplicado"] = {"pagina": pagina_app_form, "modo": modo, "inicio": inicio, "fim": fim, "ano": ano, "meses": meses, "dims": dims}
+        for chave in list(st.session_state):
+            if chave.startswith("bi_widget_"):
+                del st.session_state[chave]
+        st.rerun()
 
     ativo = st.session_state["bi_aplicado"]
-    pagina_app = ativo["pagina"]
-    if ativo["modo"] == "Período":
-        dt_ini, dt_fim = ativo["inicio"], ativo["fim"]
-        mask_base = (df["DIA"] >= dt_ini) & (df["DIA"] <= dt_fim)
-    else:
-        mask_base = (df["ANO"] == ativo["ano"]) & df["MES"].isin(ativo["meses"])
-        tmp = df.loc[mask_base]
-        dt_ini, dt_fim = (tmp["DIA"].min(), tmp["DIA"].max()) if not tmp.empty else (min_dt, max_dt)
+    with st.form("form_filtros_unica"):
+        pagina_app_form = "Dashboard"
+        modo = st.radio("Visualização temporal", ["Período", "Ano / meses"], index=0 if ativo["modo"] == "Período" else 1, horizontal=True)
+        if modo == "Período":
+            intervalo = st.date_input("Intervalo de datas", value=(max(min_dt, ativo["inicio"]), min(max_dt, ativo["fim"])), min_value=min_dt, max_value=max_dt)
+            inicio, fim = (intervalo[0], intervalo[-1]) if isinstance(intervalo, (tuple,list)) and intervalo else (min_dt, max_dt)
+            ano = ativo["ano"]
+            meses = ativo["meses"]
+        else:
+            anos = sorted(df["ANO"].unique().tolist(), reverse=True)
+            ano = st.selectbox("Ano", anos, index=anos.index(ativo["ano"]) if ativo["ano"] in anos else 0)
+            meses = st.multiselect("Meses", MESES_PT, default=[m for m in ativo["meses"] if m in MESES_PT])
+            inicio, fim = min_dt, max_dt
+        st.markdown("**Dimensões de análise**")
+        st.caption("Selecione vários itens por campo. Campos diferentes se cruzam.")
+        dims = {}
+        for coluna, rotulo in DIMENSOES_BI.items():
+            if coluna not in df.columns:
+                continue
+            opcoes = _dim_opcoes(df, coluna)
+            anteriores = ativo["dims"].get(coluna, [])
+            dims[coluna] = st.multiselect(rotulo, opcoes, default=[x for x in anteriores if x in opcoes], placeholder=f"Todos os {rotulo.lower()}", key=f"bi_widget_{coluna}")
+        aplicar = st.form_submit_button("✓ Aplicar filtros", use_container_width=True, type="primary")
+    if aplicar:
+        st.session_state["bi_aplicado"] = {"pagina": pagina_app_form, "modo": modo, "inicio": inicio, "fim": fim, "ano": ano, "meses": meses, "dims": dims}
 
-    mask_dt = mask_base
-    # df_periodo_all mantém a base temporal para análises comparativas de vendedores.
-    df_periodo_all = df.loc[mask_dt].copy()
-    for coluna, valores in ativo["dims"].items():
-        if valores and coluna in df_periodo_all.columns and coluna != "VENDEDOR":
-            df_periodo_all = df_periodo_all[df_periodo_all[coluna].fillna("").astype(str).map(norm_text).isin(valores)]
+ativo = st.session_state["bi_aplicado"]
+pagina_app = ativo["pagina"]
+if ativo["modo"] == "Período":
+    dt_ini, dt_fim = ativo["inicio"], ativo["fim"]
+    mask_base = (df["DIA"] >= dt_ini) & (df["DIA"] <= dt_fim)
+else:
+    mask_base = (df["ANO"] == ativo["ano"]) & df["MES"].isin(ativo["meses"])
+    tmp = df.loc[mask_base]
+    dt_ini, dt_fim = (tmp["DIA"].min(), tmp["DIA"].max()) if not tmp.empty else (min_dt, max_dt)
 
-    vendedores_escolhidos = ativo["dims"].get("VENDEDOR", [])
-    vendedor_sel = vendedores_escolhidos[0] if len(vendedores_escolhidos) == 1 else "TODOS"
-    df_periodo = df_periodo_all.copy()
-    if vendedores_escolhidos and "VENDEDOR" in df_periodo.columns:
-        df_periodo = df_periodo[df_periodo["VENDEDOR"].fillna("").astype(str).map(norm_text).isin(vendedores_escolhidos)].copy()
+mask_dt = mask_base
+# df_periodo_all mantém a base temporal para análises comparativas de vendedores.
+df_periodo_all = df.loc[mask_dt].copy()
+for coluna, valores in ativo["dims"].items():
+    if valores and coluna in df_periodo_all.columns and coluna != "VENDEDOR":
+        df_periodo_all = df_periodo_all[df_periodo_all[coluna].fillna("").astype(str).map(norm_text).isin(valores)]
 
-    st.markdown("""<div class="bi-hero"><div class="bi-eyebrow">INTELIGÊNCIA COMERCIAL • ÚNICA ATACADISTA</div><h1>Visão de Negócios</h1><p>Explore os indicadores por área, sem sair do painel.</p></div>""", unsafe_allow_html=True)
-    selecoes = [f"{DIMENSOES_BI[c]}: {len(v)}" for c,v in ativo["dims"].items() if v]
-    st.caption(f"Período: {dt_ini:%d/%m/%Y} a {dt_fim:%d/%m/%Y}  |  " + (" • ".join(selecoes) if selecoes else "Todas as dimensões"))
-    PAGINAS_BI = ["Visão Geral", "Produtos", "Clientes e Regiões", "Análise de Marcas", "ChatBI", "Relatórios", "Exportar PDF"]
-    pagina_bi = st.radio("Navegação do BI", PAGINAS_BI, horizontal=True, key="navegacao_bi")
-    st.divider()
-    if pagina_bi == "Relatórios":
-        render_relatorios_unica(df, min_dt, max_dt)
-        st.stop()
-    if df_periodo.empty:
-        st.warning("Nenhum registro corresponde aos filtros. Altere as seleções ou limpe os filtros na lateral.")
-        st.stop()
+vendedores_escolhidos = ativo["dims"].get("VENDEDOR", [])
+vendedor_sel = vendedores_escolhidos[0] if len(vendedores_escolhidos) == 1 else "TODOS"
+df_periodo = df_periodo_all.copy()
+if vendedores_escolhidos and "VENDEDOR" in df_periodo.columns:
+    df_periodo = df_periodo[df_periodo["VENDEDOR"].fillna("").astype(str).map(norm_text).isin(vendedores_escolhidos)].copy()
 
-    st.session_state["pdf_sections"] = []
+st.markdown("""<div class="bi-hero"><div class="bi-eyebrow">INTELIGÊNCIA COMERCIAL • ÚNICA ATACADISTA</div><h1>Visão de Negócios</h1><p>Explore os indicadores por área, sem sair do painel.</p></div>""", unsafe_allow_html=True)
+selecoes = [f"{DIMENSOES_BI[c]}: {len(v)}" for c,v in ativo["dims"].items() if v]
+st.caption(f"Período: {dt_ini:%d/%m/%Y} a {dt_fim:%d/%m/%Y}  |  " + (" • ".join(selecoes) if selecoes else "Todas as dimensões"))
+st.divider()
+if False:  # Relatórios renderizados em aba própria
+    render_relatorios_unica(df, min_dt, max_dt)
+    st.stop()
+if df_periodo.empty:
+    st.warning("Nenhum registro corresponde aos filtros. Altere as seleções ou limpe os filtros na lateral.")
+    st.stop()
 
-    # Base completa do ano (para tabelas Ano-1 e Metas), sem zerar meses fora do filtro de período/mês
-    df_base_vendor = df.copy()
-    for coluna, valores in ativo["dims"].items():
-        if valores and coluna in df_base_vendor.columns:
-            df_base_vendor = df_base_vendor[df_base_vendor[coluna].fillna("").astype(str).map(norm_text).isin(valores)].copy()
+st.session_state["pdf_sections"] = []
 
-    ano_atual = int(df_periodo_all["ANO"].max())
-    palette = (
-        pc.qualitative.Plotly
-        + pc.qualitative.D3
-        + pc.qualitative.Set2
-        + pc.qualitative.Safe
-        + pc.qualitative.Dark24
-    )
-    segmentos_base = (
-        df_periodo_all["SEGMENTO"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().tolist()
-        if "SEGMENTO" in df_periodo_all.columns
-        else []
-    )
-    SEGMENTO_COLOR_MAP = build_static_color_map(segmentos_base, palette)
-    # =========================
+# Base completa do ano (para tabelas Ano-1 e Metas), sem zerar meses fora do filtro de período/mês
+df_base_vendor = df.copy()
+for coluna, valores in ativo["dims"].items():
+    if valores and coluna in df_base_vendor.columns:
+        df_base_vendor = df_base_vendor[df_base_vendor[coluna].fillna("").astype(str).map(norm_text).isin(valores)].copy()
+
+ano_atual = int(df_periodo_all["ANO"].max())
+palette = (
+    pc.qualitative.Plotly
+    + pc.qualitative.D3
+    + pc.qualitative.Set2
+    + pc.qualitative.Safe
+    + pc.qualitative.Dark24
+)
+segmentos_base = (
+    df_periodo_all["SEGMENTO"].fillna("").astype(str).map(norm_text).replace("", pd.NA).dropna().tolist()
+    if "SEGMENTO" in df_periodo_all.columns
+    else []
+)
+SEGMENTO_COLOR_MAP = build_static_color_map(segmentos_base, palette)
+# =========================
+abas_bi = st.tabs(["Visão Geral", "Metas", "Produtos", "Clientes e Regiões", "Ranking de Clientes", "Análise de Marcas", "ChatBI", "Exportar PDF", "Relatórios"])
+with abas_bi[0]:
     # SEÇÃO 1 — Indicadores
     # =========================
     faturamento_periodo = float(df_periodo["VR_TOTAL"].sum()) if not df_periodo.empty else 0.0
@@ -1195,7 +1194,7 @@ if pagina_bi == "Visão Geral":
     st.divider()
     # =========================
     # SEÇÃO 3 — Metas
-if pagina_bi == "Produtos":
+with abas_bi[1]:
     # =========================
     st.markdown("## Metas (Período)")
     meses_meta = meses_no_periodo_ano_atual if meses_no_periodo_ano_atual else MESES_PT
@@ -1255,7 +1254,7 @@ if pagina_bi == "Produtos":
     st.divider()
     # =========================
     # SEÇÃO 4 — Produtos (Marcas / Segmentos)
-if pagina_bi == "Clientes e Regiões":
+with abas_bi[2]:
     # =========================
     st.markdown("## Produtos")
     cA, cB = st.columns([1.2, 1.0])
@@ -1375,6 +1374,7 @@ if pagina_bi == "Clientes e Regiões":
 
     st.divider()
     # =========================
+with abas_bi[3]:
     # SEÇÃO 5 — Clientes & Regiões (MAPA + EVOLUÇÃO DE CLIENTES)
     # =========================
     st.markdown("## Clientes & Regiões")
@@ -1511,7 +1511,7 @@ if pagina_bi == "Clientes e Regiões":
 
     # =========================
     # SEÇÃO 6 — Ranking de Clientes (Top clientes + marca/linha preferida + drill por linha → marca)
-if pagina_bi == "Análise de Marcas":
+with abas_bi[4]:
     # =========================
     st.divider()
     st.markdown("## Ranking de Clientes")
@@ -1643,7 +1643,7 @@ if pagina_bi == "Análise de Marcas":
 
     # =========================
     # SEÇÃO 7 — Análise por Marca (Clientes → Linhas do cliente dentro da marca)
-if pagina_bi == "ChatBI":
+with abas_bi[5]:
     # =========================
     st.divider()
     st.markdown("## Análise por Marca (Clientes e Linhas por Cliente)")
@@ -1839,7 +1839,7 @@ if pagina_bi == "ChatBI":
 
     # =========================
     # AGENTE DE BI — INTENÇÕES GERENCIAIS
-if pagina_bi == "Exportar PDF":
+with abas_bi[6]:
     # =========================
     st.divider()
     st.markdown("## ChatBI Única — Perguntas com Gemini")
@@ -3200,6 +3200,7 @@ if pagina_bi == "Exportar PDF":
     # =========================
     # EXPORTAÇÃO PDF — DASH COMPLETO
     # =========================
+with abas_bi[7]:
     st.divider()
     st.markdown("## Exportar Dashboard Completo")
     st.caption("O PDF completo consolida os indicadores, tabelas principais e os drills/tabelas atualmente selecionados no dashboard.")
@@ -3234,3 +3235,6 @@ if pagina_bi == "Exportar PDF":
             use_container_width=False,
             key="download_pdf_dashboard_completo",
         )
+
+with abas_bi[8]:
+    render_relatorios_unica(df, min_dt, max_dt)
